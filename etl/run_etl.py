@@ -33,6 +33,14 @@ from .db import (
 from .fetch_macro import build_macro_rows, download_fred_series
 from .fetch_market import build_market_rows, download_ohlcv
 
+# ── Backfill 常數 ─────────────────────────────────────────────────────────────
+# Pass 1：今日往回 300 自然日（≈207 交易日），可能不足 220。
+# Pass 2（自動觸發）：若 VOO 歷史 < BACKFILL_MIN_TRADING_DAYS，
+#           改用固定起始日 BACKFILL_FIXED_START 確保足夠。
+BACKFILL_DAYS: int            = 300
+BACKFILL_FIXED_START: date    = date(2020, 1, 1)
+BACKFILL_MIN_TRADING_DAYS: int = 220   # 必須與 engine/trend.MIN_HISTORY 保持一致
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -107,6 +115,92 @@ def run_macro_etl(start: date, end: date) -> None:
         upsert_macro_data(conn, all_rows)
 
 
+# ── Backfill Helpers ──────────────────────────────────────────────────────────
+
+def _count_voo_history(end: date) -> int:
+    """
+    查詢 DB 中 VOO 在 end 日期前的日線筆數。
+    任何 DB 失敗 → 回傳 0（呼叫端視為不足，觸發 Pass 2）。
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM raw_market_data rmd
+                    JOIN assets a ON a.asset_id = rmd.asset_id
+                    WHERE a.symbol = 'VOO'
+                      AND rmd.frequency = '1d'
+                      AND rmd.close IS NOT NULL
+                      AND rmd.time::date <= %s
+                    """,
+                    (end,),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception as exc:
+        logger.warning("[BACKFILL] Cannot count VOO history: %s", exc)
+        return 0
+
+
+def _run_backfill(end: date, run_market: bool, run_macro: bool) -> None:
+    """
+    兩階段 backfill：
+      Pass 1：今日往回 BACKFILL_DAYS（300）自然日
+      Pass 2：若 VOO 歷史 < BACKFILL_MIN_TRADING_DAYS，
+              改用固定起始日 BACKFILL_FIXED_START（2020-01-01）補抓
+
+    設計原則：
+      - 兩次都走 run_market_etl / run_macro_etl（冪等，DO NOTHING 重複無害）
+      - DB 計數失敗 → 視為不足，自動觸發 Pass 2（fail-safe）
+      - 各 pass 的 ETL 異常各自捕捉，不中斷後續
+    """
+    today = date.today()
+    start_pass1 = today - timedelta(days=BACKFILL_DAYS)
+
+    logger.info(
+        "[BACKFILL] Pass 1: %s → %s (today - %d days)",
+        start_pass1, end, BACKFILL_DAYS,
+    )
+    if run_market:
+        try:
+            run_market_etl(start_pass1, end)
+        except Exception:
+            logger.exception("[BACKFILL] Pass 1 market ETL failed")
+    if run_macro:
+        try:
+            run_macro_etl(start_pass1, end)
+        except Exception:
+            logger.exception("[BACKFILL] Pass 1 macro ETL failed")
+
+    # ── 檢查 VOO 是否已達到 Trend Layer 最低門檻 ─────────────────────────────
+    voo_count = _count_voo_history(end)
+    if voo_count < BACKFILL_MIN_TRADING_DAYS:
+        logger.warning(
+            "[BACKFILL] initial backfill insufficient (%d < %d), "
+            "retrying with fixed start date %s",
+            voo_count, BACKFILL_MIN_TRADING_DAYS, BACKFILL_FIXED_START,
+        )
+        if run_market:
+            try:
+                run_market_etl(BACKFILL_FIXED_START, end)
+            except Exception:
+                logger.exception("[BACKFILL] Pass 2 market ETL failed")
+        if run_macro:
+            try:
+                run_macro_etl(BACKFILL_FIXED_START, end)
+            except Exception:
+                logger.exception("[BACKFILL] Pass 2 macro ETL failed")
+    else:
+        logger.info(
+            "[BACKFILL] VOO history sufficient: %d rows >= %d",
+            voo_count, BACKFILL_MIN_TRADING_DAYS,
+        )
+
+    logger.info("[BACKFILL] complete.")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -128,14 +222,35 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--market-only", action="store_true", help="Only run market ETL")
     parser.add_argument("--macro-only",  action="store_true", help="Only run macro ETL")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help=(
+            f"Backfill mode: override --start to today - {BACKFILL_DAYS} days "
+            f"to ensure sufficient history for Trend Layer (needs >= 220 trading days of VOO)."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    start: date = args.start
+    today = date.today()
     end:   date = args.end
 
+    run_market = not args.macro_only
+    run_macro  = not args.market_only
+
+    # --backfill：兩階段補抓（Pass 1: 300天；Pass 2: 2020-01-01 if insufficient）
+    if args.backfill:
+        logger.info("=" * 60)
+        logger.info("ETL backfill mode  end=%s", end)
+        logger.info("DB: %s@%s:%s/%s", DB.user, DB.host, DB.port, DB.dbname)
+        logger.info("=" * 60)
+        _run_backfill(end, run_market, run_macro)
+        return
+
+    start = args.start
     if start > end:
         logger.error("--start (%s) must be <= --end (%s)", start, end)
         sys.exit(1)
@@ -144,9 +259,6 @@ def main() -> None:
     logger.info("ETL start  %s → %s", start, end)
     logger.info("DB: %s@%s:%s/%s", DB.user, DB.host, DB.port, DB.dbname)
     logger.info("=" * 60)
-
-    run_market = not args.macro_only
-    run_macro  = not args.market_only
 
     if run_market:
         logger.info("── Market ETL ──")

@@ -191,10 +191,17 @@ def _step_report(report_date: date, no_db: bool = False) -> tuple[bool, Path | N
             # ── Layer 2：Trend Risk Cap（VOO 200DMA）──────────────────────────
             trend_result = None
             try:
-                from engine.trend import TrendLayer
+                from engine.trend import TrendLayer, TrendStatus
                 trend_result = TrendLayer().run(conn, report_date)
                 logger.info("  ✓ Trend Layer: %s  (history=%d)",
                             trend_result.status.value, trend_result.history_len)
+                # Phase 2-B：VOO DB 完全空白時 ERROR 提示（需執行 backfill）
+                if (trend_result.status == TrendStatus.WARMUP
+                        and trend_result.history_len == 0):
+                    logger.error(
+                        "[TREND] VOO history is empty in DB — "
+                        "run: python -m etl.run_etl --backfill"
+                    )
             except Exception as exc:
                 logger.warning("  ⚠ Trend Layer 計算失敗（報告仍繼續）：%s", exc)
 
@@ -203,9 +210,10 @@ def _step_report(report_date: date, no_db: bool = False) -> tuple[bool, Path | N
             try:
                 from engine.macro_alloc import classify_macro_alloc
                 macro_alloc_result = classify_macro_alloc(
-                    cfnai  = snap.ism_pmi,
-                    spread = snap.spread_10y2y,
-                    vix    = snap.vix,
+                    cfnai        = snap.ism_pmi,
+                    spread       = snap.spread_10y2y,
+                    vix          = snap.vix,
+                    vix_pct_rank = snap.vix_pct_rank,
                 )
                 logger.info("  ✓ Macro Alloc: %s", macro_alloc_result.status.value)
             except Exception as exc:

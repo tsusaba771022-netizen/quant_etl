@@ -1019,9 +1019,10 @@ def _layer_section(
             "DEFENSIVE":  "🔴 DEFENSIVE",
         }
         icon = _ALLOC_ICON.get(macro_alloc.status.value, macro_alloc.status.value)
-        cfnai_str  = f"{macro_alloc.cfnai:+.2f}"  if macro_alloc.cfnai  is not None else "N/A"
-        spread_str = f"{macro_alloc.spread:+.2f}%" if macro_alloc.spread is not None else "N/A"
-        vix_str    = f"{macro_alloc.vix:.1f}"      if macro_alloc.vix    is not None else "N/A"
+        cfnai_str   = f"{macro_alloc.cfnai:+.2f}"   if macro_alloc.cfnai        is not None else "N/A"
+        spread_str  = f"{macro_alloc.spread:+.2f}%"  if macro_alloc.spread       is not None else "N/A"
+        vix_str     = f"{macro_alloc.vix:.1f}"       if macro_alloc.vix          is not None else "N/A"
+        pct_str     = f"{macro_alloc.vix_pct_rank:.0%}" if macro_alloc.vix_pct_rank is not None else "N/A"
         lines += [
             f"| 項目 | 值 |",
             f"|------|----|",
@@ -1029,6 +1030,7 @@ def _layer_section(
             f"| CFNAI | {cfnai_str} |",
             f"| Yield Spread | {spread_str} |",
             f"| VIX | {vix_str} |",
+            f"| VIX 百分位（252日） | {pct_str} |",
             f"| 說明 | {macro_alloc.rationale} |",
             "",
         ]

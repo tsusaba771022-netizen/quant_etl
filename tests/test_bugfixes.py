@@ -1140,6 +1140,111 @@ class TestMacroAllocMatrix(unittest.TestCase):
         result = classify_macro_alloc(cfnai=0.30, spread=0.50, vix=19.9)
         self.assertEqual(result.status, MacroAllocStatus.AGGRESSIVE)
 
+    # ── G-12  Phase 2 噪音過濾：VIX elevated + pct_rank >= 0.80 → DEFENSIVE ──
+
+    def test_G12_vix_elevated_high_pct_rank_triggers_defensive(self):
+        """
+        Phase 2：VIX=25.0（elevated）AND pct_rank=0.85（>= 0.80）
+        預期：DEFENSIVE（雙重門檻均滿足）
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=25.0, vix_pct_rank=0.85
+        )
+        self.assertEqual(result.status, MacroAllocStatus.DEFENSIVE)
+        self.assertIn("pct_rank=0.85", result.rationale)
+
+    # ── G-13  Phase 2 噪音過濾：VIX elevated + pct_rank < 0.80 → 過濾掉 ────
+
+    def test_G13_vix_elevated_low_pct_rank_filtered_out(self):
+        """
+        Phase 2：VIX=22.0（elevated）但 pct_rank=0.60（< 0.80）。
+        VIX DEFENSIVE 被過濾，但 AGGRESSIVE 的 vix_ok 維持 level-only（vix < 20 → False）。
+        預期：NEUTRAL（DEFENSIVE 被濾掉，AGGRESSIVE 也因 vix_ok=False 不成立）
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=22.0, vix_pct_rank=0.60
+        )
+        self.assertEqual(result.status, MacroAllocStatus.NEUTRAL,
+                         f"VIX elevated（≥20）時：DEFENSIVE 被 pct_rank 過濾，"
+                         f"AGGRESSIVE vix_ok=False → NEUTRAL；實際：{result.status}")
+
+    # ── G-14  Phase 2：pct_rank=None → 退回 Phase 1 level-only（P-1 fallback）
+
+    def test_G14_vix_pct_rank_none_fallback_to_level_only(self):
+        """
+        Phase 2 fallback（P-1）：vix_pct_rank=None 時，退回 Phase 1 level-only。
+        VIX=25.0 (elevated)，pct_rank=None → 仍觸發 DEFENSIVE。
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=25.0, vix_pct_rank=None
+        )
+        self.assertEqual(result.status, MacroAllocStatus.DEFENSIVE,
+                         "pct_rank=None 應退回 level-only（Phase 1 行為），VIX elevated 仍觸發")
+        self.assertIn("fallback", result.rationale,
+                      "rationale 應標示 fallback 原因")
+
+    # ── G-15  Phase 2：pct_rank 剛好等於門檻 0.80 → DEFENSIVE ─────────────────
+
+    def test_G15_vix_pct_rank_exactly_at_threshold_triggers_defensive(self):
+        """
+        pct_rank=0.80（剛好等於 VIX_PCT_RANK_THRESHOLD=0.80）
+        預期：DEFENSIVE（>= 門檻即觸發）
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=25.0, vix_pct_rank=0.80
+        )
+        self.assertEqual(result.status, MacroAllocStatus.DEFENSIVE)
+
+    # ── G-16  Phase 2：pct_rank 剛好低於門檻 0.799 → 過濾 ─────────────────────
+
+    def test_G16_vix_pct_rank_just_below_threshold_filtered(self):
+        """
+        pct_rank=0.799（剛好低於 VIX_PCT_RANK_THRESHOLD=0.80）。
+        VIX DEFENSIVE 被過濾，但 vix=25.0 > VIX_ELEVATED → AGGRESSIVE vix_ok=False。
+        預期：NEUTRAL（同 G13，AGGRESSIVE 端維持 level-only 不升級）
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=25.0, vix_pct_rank=0.799
+        )
+        self.assertEqual(result.status, MacroAllocStatus.NEUTRAL,
+                         f"pct_rank=0.799 < 0.80 → DEFENSIVE 被過濾；"
+                         f"vix=25.0 ≥ 20 → AGGRESSIVE vix_ok=False → NEUTRAL；實際：{result.status}")
+
+    # ── G-17  Phase 2：MacroAllocResult 包含 vix_pct_rank 欄位 ─────────────────
+
+    def test_G17_result_contains_vix_pct_rank_field(self):
+        """
+        MacroAllocResult dataclass 必須包含 vix_pct_rank 欄位，
+        且值與輸入一致（可追溯性）。
+        """
+        from engine.macro_alloc import classify_macro_alloc
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=15.0, vix_pct_rank=0.55
+        )
+        self.assertTrue(hasattr(result, "vix_pct_rank"),
+                        "MacroAllocResult 應有 vix_pct_rank 欄位")
+        self.assertAlmostEqual(result.vix_pct_rank, 0.55)
+
+    # ── G-18  Phase 2：VIX=None + pct_rank=0.90 → VIX 條件不觸發 ─────────────
+
+    def test_G18_vix_none_pct_rank_provided_no_vix_defensive(self):
+        """
+        vix=None（缺值）但 pct_rank=0.90。
+        預期：VIX 條件整體跳過（vix is None → 判斷短路），不誤觸 DEFENSIVE。
+        """
+        from engine.macro_alloc import classify_macro_alloc, MacroAllocStatus
+        # cfnai=0.30 (>= 0.10), spread=0.50 (> 0), vix=None → vix_ok=True
+        result = classify_macro_alloc(
+            cfnai=0.30, spread=0.50, vix=None, vix_pct_rank=0.90
+        )
+        self.assertEqual(result.status, MacroAllocStatus.AGGRESSIVE,
+                         "vix=None 時 VIX 條件不應觸發 DEFENSIVE，其餘條件正向應為 AGGRESSIVE")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Group H  Layer Integration（四層架構整合）
@@ -1240,6 +1345,104 @@ class TestLayerIntegration(unittest.TestCase):
         result = compute_trend_status([100.0] * 50)
         self.assertIn("200DMA", result.rationale,
                       "WARMUP rationale 應說明 200DMA 計算不足")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group I  Phase 2-B：VOO Backfill / Warm-up Management
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestBackfillManagement(unittest.TestCase):
+    """
+    Phase 2-B：
+    - BACKFILL_DAYS 常數是否存在且值正確
+    - --backfill flag 使 start 日期正確覆寫
+    - history_len==0 的 WARMUP 判別（run_daily.py 的 ERROR 路徑靠整合測試覆蓋）
+    """
+
+    # ── I-1  BACKFILL_DAYS 常數存在且等於 300 ─────────────────────────────────
+
+    def test_I1_backfill_days_constant_exists_and_correct(self):
+        """
+        etl/run_etl.py 頂部必須有 BACKFILL_DAYS = 300。
+        """
+        from etl.run_etl import BACKFILL_DAYS
+        self.assertEqual(BACKFILL_DAYS, 300,
+                         f"BACKFILL_DAYS 應為 300，實際 {BACKFILL_DAYS}")
+
+    # ── I-2  parse_args() 包含 --backfill 旗標 ────────────────────────────────
+
+    def test_I2_parse_args_has_backfill_flag(self):
+        """
+        parse_args() 應接受 --backfill 旗標且預設為 False。
+        """
+        from etl.run_etl import parse_args
+        import sys
+        old_argv = sys.argv
+        try:
+            sys.argv = ["run_etl"]          # 無 --backfill
+            args = parse_args()
+            self.assertFalse(args.backfill,
+                             "--backfill 未傳入時應為 False")
+        finally:
+            sys.argv = old_argv
+
+    # ── I-3  新常數：BACKFILL_FIXED_START 和 BACKFILL_MIN_TRADING_DAYS ──────────
+
+    def test_I3_backfill_constants_correct(self):
+        """
+        BACKFILL_FIXED_START = date(2020, 1, 1)
+        BACKFILL_MIN_TRADING_DAYS = 220（必須與 engine/trend.MIN_HISTORY 一致）
+        """
+        from datetime import date
+        from etl.run_etl import BACKFILL_FIXED_START, BACKFILL_MIN_TRADING_DAYS
+        from engine.trend import MIN_HISTORY
+        self.assertEqual(BACKFILL_FIXED_START, date(2020, 1, 1),
+                         f"BACKFILL_FIXED_START 應為 2020-01-01，實際 {BACKFILL_FIXED_START}")
+        self.assertEqual(BACKFILL_MIN_TRADING_DAYS, MIN_HISTORY,
+                         f"BACKFILL_MIN_TRADING_DAYS={BACKFILL_MIN_TRADING_DAYS} "
+                         f"應與 engine/trend.MIN_HISTORY={MIN_HISTORY} 一致")
+
+    # ── I-4  history_len==0 代表 DB 完全空白 ─────────────────────────────────
+
+    def test_I4_warmup_history_len_zero_signals_empty_db(self):
+        """
+        compute_trend_status([]) → history_len=0, status=WARMUP。
+        這是 run_daily.py 中觸發 ERROR log 的條件。
+        """
+        from engine.trend import compute_trend_status, TrendStatus
+        result = compute_trend_status([])
+        self.assertEqual(result.status, TrendStatus.WARMUP)
+        self.assertEqual(result.history_len, 0,
+                         "空 list → history_len=0，代表 DB 無 VOO 資料")
+
+    # ── I-5  history_len > 0 但 < 220 → WARMUP，不觸發 empty-DB ERROR ────────
+
+    def test_I5_warmup_partial_history_not_empty(self):
+        """
+        50 筆 VOO → WARMUP，但 history_len=50（非 0）。
+        run_daily.py 應不觸發 empty-DB ERROR log（只觸發在 history_len==0 時）。
+        """
+        from engine.trend import compute_trend_status, TrendStatus
+        result = compute_trend_status([100.0] * 50)
+        self.assertEqual(result.status, TrendStatus.WARMUP)
+        self.assertGreater(result.history_len, 0,
+                           "有部分資料（50 筆），history_len 不為 0")
+
+    # ── I-6  _count_voo_history：DB 失敗時回傳 0（fail-safe → 觸發 Pass 2）──
+
+    def test_I6_count_voo_history_returns_zero_on_db_failure(self):
+        """
+        _count_voo_history() 在 DB 連線失敗時回傳 0，
+        確保 Pass 2 被自動觸發（fail-safe 而非 fail-open）。
+        """
+        from unittest.mock import patch
+        from datetime import date
+        from etl.run_etl import _count_voo_history
+
+        with patch("etl.run_etl.get_connection", side_effect=Exception("DB down")):
+            count = _count_voo_history(date.today())
+        self.assertEqual(count, 0,
+                         "DB 失敗時 _count_voo_history 應回傳 0 以觸發 Pass 2")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
