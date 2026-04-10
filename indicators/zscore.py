@@ -135,7 +135,7 @@ ZSCORE_TARGETS: Dict[str, Dict] = {
     "ISM_PMI_MFG_Z_60M": {
         "source":      "macro",
         "indicator":   "ISM_PMI_MFG",
-        "synth_name":  "ISM PMI Manufacturing",
+        "synth_name":  "CFNAI (Chicago Fed National Activity Index)",
         "window":      60,       # 60 個月觀測值（≈ 5 年）
         "min_periods": 12,       # 最少 1 年月資料才輸出
         "frequency":   "monthly",

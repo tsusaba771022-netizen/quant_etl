@@ -673,34 +673,39 @@ class TestDryRunAndTestPush(unittest.TestCase):
     # ── E-1  合成情境 markdown 可正確生成 ─────────────────────────────────────
 
     def test_E1_scenario_normal_generates_valid_markdown(self):
-        """normal 情境：PMI 有值，z_signal 為黃燈。"""
+        """normal 情境：CFNAI 有值（+0.23，CFNAI 量級），z_signal 為黃燈。"""
         from report.send_line import _make_scenario_md
         from report.line_flex import _parse
         md = _make_scenario_md("normal", date(2026, 4, 10))
         p  = _parse(md)
-        self.assertEqual(p["pmi"], "49.8")
+        # P3-2：模板值已更新為 CFNAI 量級（+0.23），regex 取數字部分 = "0.23"
+        self.assertEqual(p["pmi"], "0.23",
+            "CFNAI 模板值應為 CFNAI 量級（+0.23），regex 提取數字部分 = '0.23'")
         self.assertIn("🟡", p["z_signal"], "normal 情境應為黃燈")
         self.assertEqual(p["scenario"], "B")
 
     def test_E2_scenario_hy_red_generates_red_signal(self):
-        """hy-red 情境：z_signal 必須為紅燈且點名 HY OAS。"""
+        """hy-red 情境：CFNAI=-0.15（放緩量級），z_signal 為紅燈且點名 HY OAS。"""
         from report.send_line import _make_scenario_md
         from report.line_flex import _parse
         md = _make_scenario_md("hy-red", date(2026, 4, 10))
         p  = _parse(md)
-        self.assertEqual(p["pmi"], "48.1")
+        # P3-2：模板值已更新為 CFNAI 量級（-0.15），regex 取數字部分 = "0.15"
+        self.assertEqual(p["pmi"], "0.15",
+            "CFNAI 模板值應為 CFNAI 量級（-0.15），regex 提取數字部分 = '0.15'")
         self.assertIn("🔴",    p["z_signal"], "hy-red 情境 z_signal 應為紅燈")
         self.assertIn("HY OAS", p["z_signal"], "z_signal 應點名 HY OAS")
         self.assertEqual(p["scenario"], "C")
 
     def test_E3_scenario_pmi_missing_shows_forwarded_value(self):
-        """pmi-missing 情境：PMI 顯示沿用上期值（49.8），不應為 N/A。"""
+        """pmi-missing 情境：CFNAI 顯示沿用上期值（+0.23），不應為 N/A。"""
         from report.send_line import _make_scenario_md
         from report.line_flex import _parse
         md = _make_scenario_md("pmi-missing", date(2026, 4, 10))
         p  = _parse(md)
-        self.assertEqual(p["pmi"], "49.8",
-            "PMI 當日缺值但有前值時，應顯示沿用的有效值，不應為 N/A")
+        # P3-2：模板值已更新為 CFNAI 量級（+0.23），regex 提取 "0.23"
+        self.assertEqual(p["pmi"], "0.23",
+            "CFNAI 當日缺值但有前值時，應顯示沿用的有效 CFNAI 值，不應為 N/A")
         self.assertIn("🟢", p["z_signal"], "pmi-missing 情境 z_signal 應為綠燈")
 
     # ── E-4  _inject_test_banner 注入正確 ─────────────────────────────────────
@@ -1584,6 +1589,216 @@ class TestP3AllocationOverride(unittest.TestCase):
         # 確認未超出原始上限
         self.assertLess(pos.weights.get("QQQM", 0.0), 0.12,
             "DEFENSIVE 後 QQQM weight 不應超過原始上限 0.12")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group K  P3-2 CFNAI 資料流端到端靜態驗證（不需 DB / API key）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupK_CfnaiStaticValidation(unittest.TestCase):
+    """V1-V6 static checks: config wiring, thresholds, SQL shape,
+    z-score label, template values — all without live DB or API keys."""
+
+    # ── K1  ETL config: ISM_PMI_MFG → CFNAI on FRED ─────────────────────────
+
+    def test_K1_fred_series_ism_pmi_mfg_points_to_cfnai(self):
+        """FRED_SERIES['ISM_PMI_MFG']['fred_id'] 必須是 'CFNAI'（Plan B 命名）。"""
+        from etl.config import FRED_SERIES
+        self.assertEqual(
+            FRED_SERIES["ISM_PMI_MFG"]["fred_id"], "CFNAI",
+            "Plan B: ISM_PMI_MFG indicator 對應 FRED 序列應為 CFNAI，而非舊 PMI series"
+        )
+
+    # ── K2  Sanity bounds: CFNAI scale, not PMI (40-65) ──────────────────────
+
+    def test_K2_sanity_bounds_ism_pmi_mfg_are_cfnai_scale(self):
+        """sanity bounds for ISM_PMI_MFG 下界必須 < 0（CFNAI 量級），
+        PMI 量級下界會是 30+，下界 < 0 即證明已切換至 CFNAI。"""
+        from etl.sanity import SANITY_BOUNDS
+        lo, hi = SANITY_BOUNDS["ISM_PMI_MFG"]
+        self.assertLess(lo, 0,
+            f"CFNAI 下界應 < 0，實際 = {lo}；若 ≥ 0 代表仍是 PMI 量級設定")
+        self.assertGreater(hi, 0,
+            f"CFNAI 上界應 > 0，實際 = {hi}")
+        self.assertLessEqual(abs(lo), 10,
+            f"CFNAI 下界絕對值應 ≤ 10（正常 ±1，極端 ±3~5），實際 = {lo}")
+
+    # ── K3  Threshold semantics: -0.70 boundary ──────────────────────────────
+
+    def test_K3_cfnai_recession_threshold_boundary(self):
+        """-0.70 本身應分類為「放緩」（not 衰退）；strictly below → 衰退。
+        對應 macro_alloc.CFNAI_RECESSION_RISK strict '<' 語意。"""
+        from engine.macro_alloc import CFNAI_RECESSION_RISK, classify_macro_alloc, MacroAllocResult
+        # Exactly at -0.70 → NOT recession risk → NEUTRAL (不觸發 DEFENSIVE)
+        result_at = classify_macro_alloc(cfnai=-0.70, spread=0.5, vix=16.0)
+        self.assertNotEqual(result_at.status, "DEFENSIVE",
+            "CFNAI = -0.70 不應觸發 DEFENSIVE（strict '<' 語意，邊界值歸 NEUTRAL）")
+        # Strictly below → DEFENSIVE
+        result_below = classify_macro_alloc(cfnai=-0.71, spread=0.5, vix=16.0)
+        self.assertEqual(result_below.status, "DEFENSIVE",
+            "CFNAI < -0.70 應觸發 DEFENSIVE")
+        # Constant value
+        self.assertEqual(CFNAI_RECESSION_RISK, -0.70,
+            "CFNAI_RECESSION_RISK 常數值應為 -0.70")
+
+    # ── K4  Threshold semantics: +0.10 boundary ──────────────────────────────
+
+    def test_K4_cfnai_mild_expansion_threshold_boundary(self):
+        """CFNAI >= 0.10 → AGGRESSIVE（其他條件均佳時）；< 0.10 → NEUTRAL。"""
+        from engine.macro_alloc import CFNAI_MILD_EXPANSION, classify_macro_alloc
+        # At +0.10, all other conditions fine → AGGRESSIVE
+        result_at = classify_macro_alloc(cfnai=0.10, spread=0.5, vix=16.0)
+        self.assertEqual(result_at.status, "AGGRESSIVE",
+            "CFNAI = 0.10（= CFNAI_MILD_EXPANSION）且其他條件佳應觸發 AGGRESSIVE")
+        # Just below → NEUTRAL
+        result_below = classify_macro_alloc(cfnai=0.09, spread=0.5, vix=16.0)
+        self.assertNotEqual(result_below.status, "AGGRESSIVE",
+            "CFNAI = 0.09 (< 0.10) 不應觸發 AGGRESSIVE")
+        self.assertEqual(CFNAI_MILD_EXPANSION, 0.10,
+            "CFNAI_MILD_EXPANSION 常數值應為 0.10")
+
+    # ── K5  SQL shape: lookback=None → 2 params (no lower-bound date) ─────────
+
+    def test_K5_lookback_none_sql_has_two_params(self):
+        """當 lookback=None 時，_latest_macro_with_dates 應使用 2 個 SQL 參數
+        （indicators, as_of），不含 lower-bound date。"""
+        from engine.snapshot import SnapshotLoader
+        captured: list = []
+
+        class _CaptureCursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, sql, params):
+                captured.append(params)
+            def fetchall(self): return []
+
+        class _CaptureConn:
+            def cursor(self): return _CaptureCursor()
+            def rollback(self): pass
+
+        loader = SnapshotLoader.__new__(SnapshotLoader)
+        loader.conn = _CaptureConn()
+        loader._latest_macro_with_dates(
+            indicators=["ISM_PMI_MFG"],
+            as_of=date(2026, 4, 10),
+            lookback=None,
+        )
+        self.assertEqual(len(captured), 1,
+            "應執行恰好一次 SQL")
+        params = captured[0]
+        self.assertEqual(len(params), 2,
+            f"lookback=None 時 SQL 應有 2 個參數 (indicators, as_of)，實際 = {len(params)}")
+
+    # ── K6  FakeConn: CFNAI value flows into snap.ism_pmi ────────────────────
+
+    def test_K6_fake_conn_cfnai_value_flows_to_snap_ism_pmi(self):
+        """SnapshotLoader 以 FakeConn 回傳 CFNAI 值 +0.23 →
+        snap.ism_pmi 應正確保存，且 abs(val) < 5.0（CFNAI 量級）。"""
+        from engine.snapshot import SnapshotLoader
+
+        cfnai_value = 0.23
+        as_of = date(2026, 4, 10)
+
+        # _latest_macro_with_dates returns {indicator: (value, date)}
+        macro_rows = [("ISM_PMI_MFG", cfnai_value, as_of)]
+
+        class _K6Cursor:
+            def __init__(self, rows): self._rows = rows
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def execute(self, sql, params): pass
+            def fetchall(self): return self._rows
+            def fetchone(self):
+                return self._rows[0] if self._rows else None
+
+        class _K6Conn:
+            def cursor(self): return _K6Cursor(macro_rows)
+            def rollback(self): pass
+
+        loader = SnapshotLoader.__new__(SnapshotLoader)
+        loader.conn = _K6Conn()
+
+        result = loader._latest_macro_with_dates(
+            indicators=["ISM_PMI_MFG"],
+            as_of=as_of,
+            lookback=None,
+        )
+        self.assertIn("ISM_PMI_MFG", result,
+            "FakeConn 回傳 ISM_PMI_MFG 後應出現在結果 dict 中")
+        val, _ = result["ISM_PMI_MFG"]
+        self.assertAlmostEqual(val, cfnai_value, places=6,
+            msg=f"snap.ism_pmi 應等於輸入的 CFNAI 值 {cfnai_value}")
+        self.assertLess(abs(val), 5.0,
+            f"CFNAI 量級應 abs < 5.0，實際 = {val}（PMI 量級會是 40-65，此檢查確保不是 PMI）")
+
+    # ── K7  MacroAllocResult.cfnai passes through unchanged ──────────────────
+
+    def test_K7_macro_alloc_result_cfnai_passthrough(self):
+        """classify_macro_alloc() 回傳的 MacroAllocResult.cfnai
+        應完整保留輸入值，不做任何截斷或轉換。"""
+        from engine.macro_alloc import classify_macro_alloc
+        test_values = [0.23, -0.15, 0.10, -0.70, 0.0, -0.71]
+        for v in test_values:
+            result = classify_macro_alloc(cfnai=v, spread=0.3, vix=16.0)
+            self.assertAlmostEqual(result.cfnai, v, places=9,
+                msg=f"MacroAllocResult.cfnai 應為 {v}，實際 = {result.cfnai}")
+
+    # ── K8  _interp_cfnai + _cfnai_status classify 0.23 / -0.15 consistently ─
+
+    def test_K8_cfnai_interpretation_consistency(self):
+        """_interp_cfnai('+0.23') 應包含「溫和擴張」；
+        _cfnai_status(0.23) 應包含「溫和擴張」。
+        _interp_cfnai('-0.15') 應包含「放緩」；
+        _cfnai_status(-0.15) 應包含「放緩」。"""
+        from report.send_line import _interp_cfnai
+        from report.daily_report import _cfnai_status
+
+        interp_pos = _interp_cfnai("+0.23")
+        status_pos = _cfnai_status(0.23)
+        self.assertIn("溫和擴張", interp_pos,
+            f"_interp_cfnai('+0.23') 應含「溫和擴張」，實際 = {interp_pos!r}")
+        self.assertIn("溫和擴張", status_pos,
+            f"_cfnai_status(0.23) 應含「溫和擴張」，實際 = {status_pos!r}")
+
+        interp_neg = _interp_cfnai("-0.15")
+        status_neg = _cfnai_status(-0.15)
+        self.assertIn("放緩", interp_neg,
+            f"_interp_cfnai('-0.15') 應含「放緩」，實際 = {interp_neg!r}")
+        self.assertIn("放緩", status_neg,
+            f"_cfnai_status(-0.15) 應含「放緩」，實際 = {status_neg!r}")
+
+    # ── K9  ZSCORE_TARGETS label uses CFNAI, not ISM PMI Manufacturing ───────
+
+    def test_K9_zscore_targets_synth_name_is_cfnai(self):
+        """indicators/zscore.py ZSCORE_TARGETS['ISM_PMI_MFG_Z_60M']['synth_name']
+        應含「CFNAI」，不應含舊標籤「ISM PMI Manufacturing」。"""
+        from indicators.zscore import ZSCORE_TARGETS
+        entry = ZSCORE_TARGETS.get("ISM_PMI_MFG_Z_60M", {})
+        synth = entry.get("synth_name", "")
+        self.assertIn("CFNAI", synth,
+            f"synth_name 應含 'CFNAI'，實際 = {synth!r}")
+        self.assertNotIn("ISM PMI Manufacturing", synth,
+            f"synth_name 不應含舊標籤 'ISM PMI Manufacturing'，實際 = {synth!r}")
+
+    # ── K10  Template CFNAI values are in CFNAI range (not PMI scale) ─────────
+
+    def test_K10_scenario_templates_cfnai_values_in_cfnai_range(self):
+        """_SCENARIO_TEMPLATES 各情境的 CFNAI 欄數值絕對值應 < 5.0，
+        確認不是 PMI 量級（40-65）。"""
+        import re
+        from report.send_line import _SCENARIO_TEMPLATES
+
+        cfnai_pattern = re.compile(
+            r"Macro Growth \(CFNAI\)\s*\|\s*([+-]?\d+\.?\d*)"
+        )
+        for scenario_id, template_text in _SCENARIO_TEMPLATES.items():
+            m = cfnai_pattern.search(template_text)
+            self.assertIsNotNone(m,
+                f"情境 '{scenario_id}' 的模板中找不到 'Macro Growth (CFNAI)' 欄位")
+            val = float(m.group(1))
+            self.assertLess(abs(val), 5.0,
+                f"情境 '{scenario_id}' 的 CFNAI 模板值 {val} 不在 CFNAI 量級範圍內"
+                f"（應 abs < 5.0；若 ≥ 40 代表仍是 PMI 量級）")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
