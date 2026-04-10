@@ -1873,6 +1873,52 @@ class TestGroupL_MonthlyStaleThreshold(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Group M  孤兒模組刪除後回歸（engine/defense.py & engine/sizing.py）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupM_OrphanModuleRemoval(unittest.TestCase):
+    """確認 engine/defense.py 與 engine/sizing.py 已不存在，
+    且主流程所有生產模組不受影響。"""
+
+    # ── M1  defense.py 不存在 ─────────────────────────────────────────────────
+
+    def test_M1_defense_module_removed(self):
+        """engine.defense 應已不可 import（檔案已刪除）。"""
+        import importlib
+        with self.assertRaises(ModuleNotFoundError,
+                msg="engine.defense 應已刪除，import 應拋 ModuleNotFoundError"):
+            importlib.import_module("engine.defense")
+
+    # ── M2  sizing.py 不存在 ──────────────────────────────────────────────────
+
+    def test_M2_sizing_module_removed(self):
+        """engine.sizing 應已不可 import（檔案已刪除）。"""
+        import importlib
+        with self.assertRaises(ModuleNotFoundError,
+                msg="engine.sizing 應已刪除，import 應拋 ModuleNotFoundError"):
+            importlib.import_module("engine.sizing")
+
+    # ── M3  主流程核心模組不受影響 ────────────────────────────────────────────
+
+    def test_M3_production_modules_unaffected(self):
+        """engine.snapshot / engine.regime / engine.signals / engine.macro_alloc /
+        engine.trend 均可正常 import，不因刪除孤兒模組而炸。"""
+        import importlib
+        prod_modules = [
+            "engine.snapshot",
+            "engine.regime",
+            "engine.signals",
+            "engine.macro_alloc",
+            "engine.trend",
+        ]
+        for mod in prod_modules:
+            try:
+                importlib.import_module(mod)
+            except Exception as e:
+                self.fail(f"{mod} import 失敗（不應受孤兒模組刪除影響）：{e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 測試用 Markdown 輔助函式
 # ══════════════════════════════════════════════════════════════════════════════
 
