@@ -28,8 +28,9 @@ MIN_ZSCORE_DENOMINATOR: float = 0.01
 
 # ── 閾值設定（可由呼叫端覆寫） ──────────────────────────────────────────────
 
-# 月資料（ISM PMI 等）：超過此天數視為過舊，降低 Confidence
-MAX_MONTHLY_STALENESS_DAYS: int = 45
+# 月資料（CFNAI 等月頻資料）：超過此天數視為過舊，降低 Confidence
+# CFNAI 正常發布週期最長 ≈ 55 天（含假期延遲），60 天為真正異常門檻
+MAX_MONTHLY_STALENESS_DAYS: int = 60
 # 日資料（HY OAS、VIX 等）：超過此天數視為過舊（例如長假期）
 MAX_DAILY_STALENESS_DAYS: int = 5
 # 衍生指標（rolling stats）：超過此天數視為過舊

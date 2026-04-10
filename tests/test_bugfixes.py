@@ -433,7 +433,7 @@ class TestPmiLatestValidValue(unittest.TestCase):
 
     def test_C2_pmi_38_days_old_still_returned(self):
         """
-        輸入：PMI 距今 38 天（< MAX_MONTHLY_STALENESS_DAYS=45），仍應返回
+        輸入：CFNAI 距今 38 天（< MAX_MONTHLY_STALENESS_DAYS=60），仍應返回
         預期：正確取值，不因「當天無更新」而缺失
         """
         pmi_date = date(2026, 3, 3)
@@ -1799,6 +1799,77 @@ class TestGroupK_CfnaiStaticValidation(unittest.TestCase):
             self.assertLess(abs(val), 5.0,
                 f"情境 '{scenario_id}' 的 CFNAI 模板值 {val} 不在 CFNAI 量級範圍內"
                 f"（應 abs < 5.0；若 ≥ 40 代表仍是 PMI 量級）")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group L  MAX_MONTHLY_STALENESS_DAYS 閾值邊界測試（45 → 60）
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupL_MonthlyStaleThreshold(unittest.TestCase):
+    """確認 MAX_MONTHLY_STALENESS_DAYS = 60，及 check_staleness() strict '>' 語意。"""
+
+    # ── L1  常數值保護 ────────────────────────────────────────────────────────
+
+    def test_L1_stale_threshold_constant_is_60(self):
+        """MAX_MONTHLY_STALENESS_DAYS 應為 60（CFNAI 月頻發布週期最長 ≈ 55 天）。"""
+        from etl.cleaner import MAX_MONTHLY_STALENESS_DAYS
+        self.assertEqual(MAX_MONTHLY_STALENESS_DAYS, 60,
+            f"常數應為 60，實際 = {MAX_MONTHLY_STALENESS_DAYS}；"
+            "若被改回 45 會對正常月頻資料誤報 STALE")
+
+    # ── L2  59 天：不應 stale ─────────────────────────────────────────────────
+
+    def test_L2_59_days_not_stale(self):
+        """staleness = 59 天 < 60：check_staleness() 應回傳 True（新鮮）。"""
+        from etl.cleaner import check_staleness
+        as_of     = date(2026, 4, 10)
+        data_date = date(2026, 2, 10)   # 59 天前
+        result = check_staleness(data_date, as_of, max_days=60, name="ISM_PMI_MFG")
+        self.assertTrue(result,
+            "59 天 < 60（閾值），應判為新鮮（True），不應觸發 STALE")
+
+    # ── L3  60 天：邊界值，不應 stale（strict '>'）────────────────────────────
+
+    def test_L3_60_days_not_stale_boundary(self):
+        """staleness = 60 天 == max_days：strict '>' → 不觸發 STALE，回傳 True。
+        邊界語意：staleness > max_days 才算舊，等於不算。"""
+        from etl.cleaner import check_staleness
+        as_of     = date(2026, 4, 10)
+        data_date = date(2026, 2, 9)    # 60 天前
+        result = check_staleness(data_date, as_of, max_days=60, name="ISM_PMI_MFG")
+        self.assertTrue(result,
+            "60 天 == max_days，strict '>' 語意下不應視為 STALE（應回傳 True）")
+
+    # ── L4  61 天：應 stale ───────────────────────────────────────────────────
+
+    def test_L4_61_days_is_stale(self):
+        """staleness = 61 天 > 60：check_staleness() 應回傳 False（過舊）。"""
+        from etl.cleaner import check_staleness
+        as_of     = date(2026, 4, 10)
+        data_date = date(2026, 2, 8)    # 61 天前
+        result = check_staleness(data_date, as_of, max_days=60, name="ISM_PMI_MFG")
+        self.assertFalse(result,
+            "61 天 > 60（閾值），應判為過舊（False），觸發 STALE warning")
+
+    # ── L5  舊閾值 45 已不再是常數值（防止意外回退）───────────────────────────
+
+    def test_L5_old_threshold_45_would_stale_at_50_days(self):
+        """驗證 50 天在新閾值（60）下為新鮮，但在舊閾值（45）下會是 STALE。
+        確認新閾值確實放寬了 45~60 天的誤報區間。"""
+        from etl.cleaner import check_staleness
+        as_of     = date(2026, 4, 10)
+        data_date = date(2026, 2, 19)   # 50 天前
+
+        # 新閾值 60：應新鮮
+        result_new = check_staleness(data_date, as_of, max_days=60, name="ISM_PMI_MFG")
+        self.assertTrue(result_new,
+            "50 天在新閾值（max_days=60）下應為新鮮（True）")
+
+        # 舊閾值 45：會過舊（確認新閾值的放寬效果）
+        result_old = check_staleness(data_date, as_of, max_days=45, name="ISM_PMI_MFG")
+        self.assertFalse(result_old,
+            "50 天在舊閾值（max_days=45）下應為過舊（False）—— "
+            "此測試確認新閾值修正了 45~60 天誤報的問題")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
