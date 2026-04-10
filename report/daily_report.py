@@ -142,14 +142,15 @@ def _vix_status(vix) -> str:
 # ── 核心建構函式 ───────────────────────────────────────────────────────────────
 
 def build_report(
-    snap:        Snapshot,
-    regime:      RegimeResult,
-    signals:     Dict[str, AssetSignal],
-    pos:         Positions,
-    output_dir:  Path = OUTPUT_DIR,
-    health:      "Optional[DataHealthResult]" = None,
-    trend:       "Optional[TrendResult]" = None,
-    macro_alloc: "Optional[MacroAllocResult]" = None,
+    snap:           Snapshot,
+    regime:         RegimeResult,
+    signals:        Dict[str, AssetSignal],
+    pos:            Positions,
+    output_dir:     Path = OUTPUT_DIR,
+    health:         "Optional[DataHealthResult]" = None,
+    trend:          "Optional[TrendResult]" = None,
+    macro_alloc:    "Optional[MacroAllocResult]" = None,
+    effective_caps: "Optional[Dict[str, float]]" = None,
 ) -> str:
     lines: list[str] = []
     matrix = RegimeMatrix().compute(snap)   # Growth × Inflation（不拋例外）
@@ -159,7 +160,7 @@ def build_report(
     _allocation_summary_section(lines, pos)
     _regime_section(lines, regime, snap)
     _regime_matrix_section(lines, matrix)  # Growth × Inflation 平行觀察
-    _portfolio_section(lines, signals, pos)
+    _portfolio_section(lines, signals, pos, effective_caps=effective_caps)
     _action_section(lines, regime, signals)
     _yesterday_comparison_section(lines, snap, regime, pos, output_dir)
     _discipline_section(lines, snap, regime)       # 執行紀律防呆提醒
@@ -545,6 +546,7 @@ def _portfolio_section(
     lines: list,
     signals: Dict[str, AssetSignal],
     pos: Positions,
+    effective_caps: "Optional[Dict[str, float]]" = None,
 ) -> None:
     lines += [
         "## 三、投資組合配置（今日目標）",
@@ -571,12 +573,20 @@ def _portfolio_section(
 
     for asset in ["QQQM", "SMH", "2330.TW"]:
         sig = signals.get(asset)
+        # 計算有效上限顯示字串（DEFENSIVE 時壓縮並加警示）
+        if (effective_caps is not None
+                and effective_caps.get(asset) is not None
+                and TACTICAL_CAPS.get(asset) is not None
+                and effective_caps[asset] < TACTICAL_CAPS[asset]):
+            cap_str = f"{effective_caps[asset]*100:.1f}% ⚠️"
+        else:
+            cap_str = TACTICAL_CAP_DISPLAY[asset]
+
         if sig is None:
-            lines.append(f"| {ASSET_DISPLAY[asset]} | — | — | — | {TACTICAL_CAP_DISPLAY[asset]} | — | — |")
+            lines.append(f"| {ASSET_DISPLAY[asset]} | — | — | — | {cap_str} | — | — |")
             continue
 
         target_w  = pos.weights.get(asset, 0.0)
-        cap_str   = TACTICAL_CAP_DISPLAY[asset]
         sig_icon  = SIGNAL_ICON.get(sig.signal_type, sig.signal_type)
         str_icon  = STRENGTH_ICON.get(sig.signal_strength, sig.signal_strength)
         chg1w     = _fmt(sig.metadata.get("chg_1w_pct"), "+.2f", "%")
@@ -597,6 +607,13 @@ def _portfolio_section(
     tactical_sum = sum(pos.weights.get(a, 0.0) for a in ["QQQM", "SMH", "2330.TW"])
     cash_w = pos.cash_weight
 
+    # Baseline 參數備注（DEFENSIVE 時額外說明）
+    defensive_note = ""
+    if (effective_caps is not None
+            and any(effective_caps.get(a, TACTICAL_CAPS.get(a, 0)) < TACTICAL_CAPS.get(a, 0)
+                    for a in ["QQQM", "SMH", "2330.TW"])):
+        defensive_note = "　｜　⚠️ **Layer 3 DEFENSIVE active — 戰術上限壓縮 × 50%**"
+
     lines += [
         "",
         "### 現金部位",
@@ -608,7 +625,7 @@ def _portfolio_section(
         f"| **現金** | **{cash_w*100:.1f}%** |",
         f"| **總計** | **100.0%** |",
         "",
-        f"> **Baseline 參數**：scouting\\_mult = {SCOUTING_MULT}，戰術上限 QQQM 12% / SMH 10% / 2330.TW 8%",
+        f"> **Baseline 參數**：scouting\\_mult = {SCOUTING_MULT}，戰術上限 QQQM 12% / SMH 10% / 2330.TW 8%{defensive_note}",
         "",
         "---",
         "",

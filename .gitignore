@@ -10,4 +10,5 @@ __pycache__/
 logs/
 output/
 state/
-backtest/
+backtest/*
+!backtest/strategy.py

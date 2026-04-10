@@ -1446,6 +1446,147 @@ class TestBackfillManagement(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Group J  P3-1：Layer 3 Allocation Override
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestP3AllocationOverride(unittest.TestCase):
+    """
+    驗證 apply_macro_alloc_caps() 純函式在各種 MacroAllocStatus 下的行為：
+    - DEFENSIVE  → 所有戰術上限 × 0.50
+    - NEUTRAL    → 不改動
+    - AGGRESSIVE → 不改動
+    - None       → 不改動
+    以及 Scenario C Credit Veto 保護、端到端 blended_portfolio_positions 整合。
+    """
+
+    def _base_caps(self):
+        return {"QQQM": 0.12, "SMH": 0.10, "2330.TW": 0.08}
+
+    def _make_macro_result(self, status_str: str):
+        """使用 classify_macro_alloc 建立指定狀態的 MacroAllocResult。"""
+        from engine.macro_alloc import classify_macro_alloc
+        if status_str == "DEFENSIVE":
+            return classify_macro_alloc(cfnai=-1.0, spread=-0.8, vix=25.0)
+        if status_str == "AGGRESSIVE":
+            return classify_macro_alloc(cfnai=0.30, spread=0.50, vix=15.0)
+        # NEUTRAL
+        return classify_macro_alloc(cfnai=0.05, spread=0.50, vix=15.0)
+
+    # ── J-1  DEFENSIVE → 所有上限 × 0.50 ────────────────────────────────────
+
+    def test_J1_defensive_halves_all_caps(self):
+        """
+        macro_alloc = DEFENSIVE → apply_macro_alloc_caps 將每個 cap × 0.50。
+        """
+        from backtest.strategy import apply_macro_alloc_caps
+        macro = self._make_macro_result("DEFENSIVE")
+        base  = self._base_caps()
+        result = apply_macro_alloc_caps(base, macro)
+        self.assertAlmostEqual(result["QQQM"],    0.06, places=6,
+            msg="DEFENSIVE：QQQM cap 應由 0.12 壓縮為 0.06")
+        self.assertAlmostEqual(result["SMH"],     0.05, places=6,
+            msg="DEFENSIVE：SMH cap 應由 0.10 壓縮為 0.05")
+        self.assertAlmostEqual(result["2330.TW"], 0.04, places=6,
+            msg="DEFENSIVE：2330.TW cap 應由 0.08 壓縮為 0.04")
+        # 確認回傳新 dict，不是修改原 dict
+        self.assertEqual(base["QQQM"], 0.12, "base_caps 不應被修改（pure function）")
+
+    # ── J-2  NEUTRAL → 回傳原 dict，不改動 ─────────────────────────────────
+
+    def test_J2_neutral_returns_base_caps_unchanged(self):
+        """macro_alloc = NEUTRAL → 上限不改動。"""
+        from backtest.strategy import apply_macro_alloc_caps
+        macro  = self._make_macro_result("NEUTRAL")
+        base   = self._base_caps()
+        result = apply_macro_alloc_caps(base, macro)
+        self.assertIs(result, base, "NEUTRAL 應直接回傳 base_caps（同物件）")
+
+    # ── J-3  AGGRESSIVE → 回傳原 dict，不改動 ───────────────────────────────
+
+    def test_J3_aggressive_returns_base_caps_unchanged(self):
+        """macro_alloc = AGGRESSIVE → 上限不改動。"""
+        from backtest.strategy import apply_macro_alloc_caps
+        macro  = self._make_macro_result("AGGRESSIVE")
+        base   = self._base_caps()
+        result = apply_macro_alloc_caps(base, macro)
+        self.assertIs(result, base, "AGGRESSIVE 應直接回傳 base_caps（同物件）")
+
+    # ── J-4  None → 回傳原 dict，不改動 ─────────────────────────────────────
+
+    def test_J4_none_macro_alloc_returns_base_caps_unchanged(self):
+        """macro_alloc = None（Layer 3 計算失敗）→ 上限不改動，不拋例外。"""
+        from backtest.strategy import apply_macro_alloc_caps
+        base   = self._base_caps()
+        result = apply_macro_alloc_caps(base, None)
+        self.assertIs(result, base, "None 應直接回傳 base_caps（同物件）")
+
+    # ── J-5  Scenario C Credit Veto：weight=0 regardless of cap ─────────────
+
+    def test_J5_scenario_c_no_trade_weight_zero_regardless_of_cap(self):
+        """
+        Scenario C（Credit Veto）時，Signal = NO_TRADE → raw_w = cap × 0 = 0。
+        即使 DEFENSIVE 未壓縮 cap，weight 仍為 0（Credit Veto 不可被 P3-1 破壞）。
+        """
+        from backtest.strategy import blended_portfolio_positions
+        from engine.signals import AssetSignal
+
+        # 所有 tactical 資產均為 NO_TRADE（Scenario C 的效果）
+        signals = {
+            "VOO":     AssetSignal(asset="VOO",     signal_type="BUY",      signal_strength="Conviction",
+                                   scenario="C", rationale="test", falling_knife=False, metadata={}),
+            "QQQM":    AssetSignal(asset="QQQM",    signal_type="NO_TRADE", signal_strength="Conviction",
+                                   scenario="C", rationale="test", falling_knife=False, metadata={}),
+            "SMH":     AssetSignal(asset="SMH",     signal_type="NO_TRADE", signal_strength="Conviction",
+                                   scenario="C", rationale="test", falling_knife=False, metadata={}),
+            "2330.TW": AssetSignal(asset="2330.TW", signal_type="NO_TRADE", signal_strength="Conviction",
+                                   scenario="C", rationale="test", falling_knife=False, metadata={}),
+        }
+        # 即使用「正常上限」（未壓縮），NO_TRADE × cap 仍 = 0
+        pos = blended_portfolio_positions(signals, tactical_caps=self._base_caps())
+        self.assertEqual(pos.weights.get("QQQM", 0.0), 0.0,
+            "NO_TRADE → weight 應為 0，Credit Veto 不受 cap 大小影響")
+        self.assertEqual(pos.weights.get("SMH", 0.0), 0.0)
+        self.assertEqual(pos.weights.get("2330.TW", 0.0), 0.0)
+
+    # ── J-6  DEFENSIVE caps 端到端流入 blended_portfolio_positions ────────────
+
+    def test_J6_defensive_caps_flow_into_blended_positions(self):
+        """
+        端到端：apply_macro_alloc_caps（DEFENSIVE）→ blended_portfolio_positions。
+        BUY/Conviction 下，最大權重應為壓縮後上限（0.06 / 0.05 / 0.04），
+        不超過原始上限（0.12 / 0.10 / 0.08）。
+        """
+        from backtest.strategy import apply_macro_alloc_caps, blended_portfolio_positions
+        from engine.signals import AssetSignal
+
+        macro = self._make_macro_result("DEFENSIVE")
+        effective_caps = apply_macro_alloc_caps(self._base_caps(), macro)
+
+        signals = {
+            "VOO":     AssetSignal(asset="VOO",     signal_type="BUY", signal_strength="Conviction",
+                                   scenario="Neutral", rationale="test", falling_knife=False, metadata={}),
+            "QQQM":    AssetSignal(asset="QQQM",    signal_type="BUY", signal_strength="Conviction",
+                                   scenario="Neutral", rationale="test", falling_knife=False, metadata={}),
+            "SMH":     AssetSignal(asset="SMH",     signal_type="BUY", signal_strength="Conviction",
+                                   scenario="Neutral", rationale="test", falling_knife=False, metadata={}),
+            "2330.TW": AssetSignal(asset="2330.TW", signal_type="BUY", signal_strength="Conviction",
+                                   scenario="Neutral", rationale="test", falling_knife=False, metadata={}),
+        }
+        pos = blended_portfolio_positions(signals, tactical_caps=effective_caps)
+
+        # BUY/Conviction → multiplier = 1.0 → weight = effective_cap
+        self.assertAlmostEqual(pos.weights.get("QQQM", 0.0), 0.06, places=5,
+            msg="DEFENSIVE + BUY/Conviction：QQQM weight 應為壓縮後上限 0.06")
+        self.assertAlmostEqual(pos.weights.get("SMH", 0.0), 0.05, places=5,
+            msg="DEFENSIVE + BUY/Conviction：SMH weight 應為壓縮後上限 0.05")
+        self.assertAlmostEqual(pos.weights.get("2330.TW", 0.0), 0.04, places=5,
+            msg="DEFENSIVE + BUY/Conviction：2330.TW weight 應為壓縮後上限 0.04")
+        # 確認未超出原始上限
+        self.assertLess(pos.weights.get("QQQM", 0.0), 0.12,
+            "DEFENSIVE 後 QQQM weight 不應超過原始上限 0.12")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 測試用 Markdown 輔助函式
 # ══════════════════════════════════════════════════════════════════════════════
 

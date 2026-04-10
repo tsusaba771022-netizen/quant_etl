@@ -162,10 +162,11 @@ def _step_line(report_path: Path, report_date: date) -> bool:
 def _step_report(report_date: date, no_db: bool = False) -> tuple[bool, Path | None]:
     """Step 3：Daily Report（Regime + Signal + 日報輸出）"""
     from etl.db import get_connection
+    from etl.config import TACTICAL_CAPS
     from engine.regime import RegimeEngine
     from engine.signals import SignalEngine
     from engine.snapshot import SnapshotLoader
-    from backtest.strategy import blended_portfolio_positions
+    from backtest.strategy import blended_portfolio_positions, apply_macro_alloc_caps
     from report.daily_report import SCOUTING_MULT, build_report
     from report.run_daily_report import _write_regime_signals
 
@@ -177,7 +178,6 @@ def _step_report(report_date: date, no_db: bool = False) -> tuple[bool, Path | N
             snap    = SnapshotLoader(conn).load(report_date)
             regime  = RegimeEngine().run(snap)
             signals = SignalEngine().run(snap, regime)
-            pos     = blended_portfolio_positions(signals, scouting_mult=SCOUTING_MULT)
 
             # 資料健康度檢查（缺值不中斷報告）
             health = None
@@ -219,11 +219,28 @@ def _step_report(report_date: date, no_db: bool = False) -> tuple[bool, Path | N
             except Exception as exc:
                 logger.warning("  ⚠ Macro Alloc 計算失敗（報告仍繼續）：%s", exc)
 
+            # ── P3-1：Layer 3 Allocation Override → effective_caps ────────────
+            # DEFENSIVE → 戰術上限 × 0.50；其他 / None → 不改動
+            effective_caps = apply_macro_alloc_caps(TACTICAL_CAPS, macro_alloc_result)
+            if effective_caps is not TACTICAL_CAPS:
+                logger.info(
+                    "  [P3-1] Layer 3 DEFENSIVE active — tactical caps compressed × %.0f%%",
+                    100 * (list(effective_caps.values())[0] / list(TACTICAL_CAPS.values())[0])
+                    if TACTICAL_CAPS else 0,
+                )
+
+            pos = blended_portfolio_positions(
+                signals,
+                scouting_mult=SCOUTING_MULT,
+                tactical_caps=effective_caps,
+            )
+
             report  = build_report(
                 snap, regime, signals, pos,
-                health      = health,
-                trend       = trend_result,
-                macro_alloc = macro_alloc_result,
+                health        = health,
+                trend         = trend_result,
+                macro_alloc   = macro_alloc_result,
+                effective_caps = effective_caps,
             )
 
             out_path = OUTPUT_DIR / f"daily_report_{report_date}.md"
