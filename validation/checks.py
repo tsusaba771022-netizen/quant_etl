@@ -232,7 +232,7 @@ def check_macro_data(
     results: List[CheckResult] = []
     time_filter = _build_time_filter("time", start, end)
 
-    total = _scalar(conn, f"SELECT COUNT(*) FROM macro_data WHERE revision=0 {time_filter}")
+    total = _scalar(conn, f"SELECT COUNT(*) FROM macro_data WHERE 1=1 {time_filter}")
     if total is None or total == 0:
         results.append(CheckResult(
             "macro_data.total_rows", "FAIL",
@@ -250,7 +250,7 @@ def check_macro_data(
     # ── Per indicator ─────────────────────────────────────────────────────────
     rows = _safe_query(conn, f"""
         SELECT
-            indicator_code,
+            indicator,
             COUNT(*)                                               AS row_count,
             MIN(time)::date                                        AS start_date,
             MAX(time)::date                                        AS end_date,
@@ -258,9 +258,9 @@ def check_macro_data(
                   ::numeric / NULLIF(COUNT(*), 0), 4)              AS null_rate,
             EXTRACT(EPOCH FROM (NOW() - MAX(time))) / 86400        AS staleness_days
         FROM macro_data
-        WHERE revision = 0 {time_filter}
-        GROUP BY indicator_code
-        ORDER BY indicator_code
+        WHERE 1=1 {time_filter}
+        GROUP BY indicator
+        ORDER BY indicator
     """)
 
     found_codes = set()
@@ -514,8 +514,7 @@ def check_time_alignment(
             FROM trading_days td
             LEFT JOIN macro_data md
               ON md.time::date <= td.td
-             AND md.indicator_code = %s
-             AND md.revision = 0
+             AND md.indicator = %s
             GROUP BY td.td
         )
         SELECT
@@ -586,8 +585,7 @@ def check_time_alignment(
         FROM trading_days td
         LEFT JOIN LATERAL (
             SELECT time FROM macro_data
-            WHERE indicator_code = 'HY_OAS'
-              AND revision = 0
+            WHERE indicator = 'HY_OAS'
               AND time::date <= td.td
             ORDER BY time DESC LIMIT 1
         ) md ON true
