@@ -122,6 +122,50 @@ class Snapshot:
         return "Low"
 
     @property
+    def confidence_reason(self) -> str:
+        """
+        confidence_score 降級的最主要原因（極簡一句話）。
+        High → "" （無需說明）
+        其他 → 最主要一個原因字串
+        """
+        if self.confidence_score == "High":
+            return ""
+
+        # CFNAI 缺失
+        if self.ism_pmi is None:
+            return "CFNAI 資料缺失"
+
+        # CFNAI 月頻落後（日期已知且超閾值）
+        if self.ism_pmi_date is not None:
+            staleness = (self.as_of - self.ism_pmi_date).days
+            if staleness > MAX_MONTHLY_STALENESS_DAYS:
+                return f"CFNAI 月頻，距今 {staleness} 天"
+            # CFNAI 新鮮但降至 Medium → 某日頻指標缺失
+            missing_daily = [
+                k for k, v in {
+                    "HY OAS": self.hy_oas,
+                    "VIX": self.vix,
+                    "VIX PCT RANK": self.vix_pct_rank,
+                    "Yield Spread": self.spread_10y2y,
+                }.items() if v is None
+            ]
+            if missing_daily:
+                return f"缺失指標：{missing_daily[0]}"
+
+        # ism_pmi_date=None（無法判斷新鮮度）但仍降至 Medium → 某日頻指標缺失
+        missing_daily = [
+            k for k, v in {
+                "HY OAS": self.hy_oas,
+                "VIX": self.vix,
+                "Yield Spread": self.spread_10y2y,
+            }.items() if v is None
+        ]
+        if missing_daily:
+            return f"缺失指標：{missing_daily[0]}"
+
+        return "部分指標不完整"
+
+    @property
     def missing_indicators(self) -> List[str]:
         checks = {
             "ISM_PMI_MFG":       self.ism_pmi,
