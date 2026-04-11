@@ -240,6 +240,23 @@ def build_line_message(md_text: str, report_date: date) -> str:
         if ffill_m else None
     )
 
+    # ── L1 決策摘要 ──────────────────────────────────────────────────────────
+    _l1_m        = re.search(r'## 決策摘要[\s\S]+?(?=\n---)', md_text)
+    _l1          = _l1_m.group(0) if _l1_m else ""
+    tactical_dir = _pick(r'\|\s*\*\*戰術指令\*\*\s*\|\s*\*\*([^*|]+)\*\*', _l1)
+    core_driver  = _pick(r'\|\s*\*\*核心驅動\*\*\s*\|\s*([^|]+)', _l1).strip()
+    conf_reason  = _pick(r'\|\s*\*\*信心度\*\*\s*\|\s*[^|\n]*—\s*([^|]+)', _l1).strip()
+    driver_detail = _pick(r'>\s+([^\n]+)', _l1)
+
+    # ── Enum 狀態標籤（從 ## 一 段落提取）────────────────────────────────────
+    vix_enum    = _pick(r'\|\s*VIX 波動指數\s*\|\s*[\d.]+\s+(\[[^\]]+\])', md_text)
+    hy_enum     = _pick(r'\|\s*HY OAS 信用利差\s*\|\s*[\d.]+%\s+(\[[^\]]+\])', md_text)
+    spread_enum = _pick(r'\|\s*10Y-2Y 利差\s*\|\s*[+\-\d.]+%\s+(\[[^\]]+\])', md_text)
+    cfnai_enum  = _pick(r'\|\s*Macro Growth \(CFNAI\)\s*\|\s*[+\-\d.]+\s+(\[[^\]]+\])', md_text)
+
+    # ── L3 系統工程狀態 ───────────────────────────────────────────────────────
+    sys_status  = _pick(r'\*\*(🟢 Healthy|🟡 Degraded|🔴 Partial)\*\*', md_text)
+
     # ── Z-Score 雷達（從 section 一-B 子文字解析，避免與 section 一 標籤撞名）──
     # section 一 有 "10Y-2Y 利差"（原始值），section 一-B 也有同名欄位（z-score）
     # 先取出 section 一-B 子文字，再在其中做 regex
@@ -283,9 +300,21 @@ def build_line_message(md_text: str, report_date: date) -> str:
 
     # 2. 基本狀態
     add(f"📊 {sc_str}　Confidence：{confidence}")
+    if conf_reason and conf_reason not in ("N/A", ""):
+        add(f"  ℹ️ {conf_reason}")
 
     # 3. 一句話結論
     add("", f"💡 {conclusion}", S)
+
+    # 2.5 決策核心
+    add("🎯 決策核心")
+    if tactical_dir != "N/A":
+        add(f"  指令：{tactical_dir}")
+    if core_driver != "N/A":
+        add(f"  驅動：{core_driver}")
+    if driver_detail != "N/A":
+        add(f"  {driver_detail}")
+    add(S)
 
     # 4. 今日目標配置
     add(
@@ -298,13 +327,17 @@ def build_line_message(md_text: str, report_date: date) -> str:
         S,
     )
 
-    # 5. 風險摘要（含解讀）
+    # 5. 風險摘要（含解讀 + enum 狀態標籤）
+    _vix_tag    = f"{vix_enum}  "    if vix_enum    != "N/A" else ""
+    _hy_tag     = f"{hy_enum}  "     if hy_enum     != "N/A" else ""
+    _spread_tag = f"{spread_enum}  " if spread_enum != "N/A" else ""
+    _cfnai_tag  = f"{cfnai_enum}  "  if cfnai_enum  != "N/A" else ""
     add(
         "⚠️ 風險摘要",
-        f"  VIX    {vix_note}",
-        f"  HY OAS {hy_note}",
-        f"  Spread {spread_note}",
-        f"  CFNAI  {pmi_note}",
+        f"  VIX    {_vix_tag}{vix_note}",
+        f"  HY OAS {_hy_tag}{hy_note}",
+        f"  Spread {_spread_tag}{spread_note}",
+        f"  CFNAI  {_cfnai_tag}{pmi_note}",
         S,
     )
 
@@ -371,11 +404,18 @@ def build_line_message(md_text: str, report_date: date) -> str:
     if ffill_note:
         data_notes.append(ffill_note)
     if confidence != "High":
-        data_notes.append(f"Confidence {confidence}：部分指標缺失，訊號供參考")
+        _cr = conf_reason if conf_reason and conf_reason not in ("N/A", "") else "部分指標缺失，訊號供參考"
+        data_notes.append(f"Confidence {confidence}：{_cr}")
     if data_notes:
         add("ℹ️ 資料提醒")
         for n in data_notes:
             add(f"  • {n}")
+
+    # L3. 系統工程狀態（僅在非 Healthy 時顯示）
+    if sys_status not in ("N/A", "🟢 Healthy"):
+        add(S, f"🔧 {sys_status}")
+        if conf_reason and conf_reason not in ("N/A", ""):
+            add(f"  {conf_reason}")
 
     return "\n".join(parts)
 
