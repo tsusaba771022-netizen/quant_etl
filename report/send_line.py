@@ -198,12 +198,15 @@ def build_line_message(md_text: str, report_date: date) -> str:
     hy_oas  = _pick(r'\|\s*HY OAS 信用利差\s*\|\s*([\d.]+%)',      md_text)
     spread  = _pick(r'\|\s*10Y-2Y 利差\s*\|\s*([+\-\d.]+%)',       md_text)
     pmi_raw  = _pick(r'\|\s*Macro Growth \(CFNAI\)\s*\|\s*([^|\n]+)', md_text)
-    _pmi_num = re.search(r'\d+\.?\d*', pmi_raw)
+    _pmi_num = re.search(r'[+-]?\d+\.?\d*', pmi_raw)   # BUG1 fix: capture sign
     pmi      = _pmi_num.group(0) if _pmi_num else "N/A"
 
     # ── Regime 判定理由 ───────────────────────────────────────────────────
-    regime_why_raw = _pick(r'> Scenario \w+：(.+?)(?=\n)', md_text)
-    # | 分隔符轉換成換行，方便 LINE 閱讀
+    # BUG2 fix: scope to ## 二、Regime 判定 block; rationale is a plain blockquote
+    _r2_m          = re.search(r'## 二、Regime 判定[\s\S]+?(?=\n---)', md_text)
+    _r2            = _r2_m.group(0) if _r2_m else ""
+    regime_why_raw = _pick(r'>\s+([^\n]+)', _r2)
+    # | 分隔符轉換成換行，方便 LINE 閱讀（保留舊格式相容）
     regime_lines = [p.strip() for p in regime_why_raw.split("|") if p.strip()]
 
     # ── 今日操作建議 ──────────────────────────────────────────────────────

@@ -2082,5 +2082,107 @@ def _make_full_md() -> str:
 """
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Group P  send_line.py parsing bug fixes
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _sl_md_cfnai(pmi_cell: str) -> str:
+    """最小 Markdown，只含 ## 一 macro section，用於測試 pmi 符號解析。"""
+    return (
+        "## 一、宏觀市場指標\n\n"
+        "| 指標 | 數值 |\n"
+        "|------|------|\n"
+        f"| Macro Growth (CFNAI) | {pmi_cell} |\n"
+        "| HY OAS 信用利差 | 2.90%  [Tight] |\n"
+        "| 10Y-2Y 利差 | +0.51%  [Flat] |\n"
+        "| VIX 波動指數 | 19.5  [Normal] |\n"
+        "| VIX 百分位 (252日) | 66.7% |\n"
+    )
+
+
+def _sl_md_regime(rationale: str) -> str:
+    """最小 Markdown，含 ## 二、Regime 判定 block，用於測試 regime_why 抽取。"""
+    return (
+        "## 二、Regime 判定\n\n"
+        "### 🟦 Neutral — 市場平靜，持倉觀察\n\n"
+        "| 項目 | 數值 |\n"
+        "|------|------|\n"
+        "| Regime 標籤 | Expansion / Soft Landing |\n\n"
+        f"> {rationale}\n\n"
+        "---\n"
+    )
+
+
+class TestGroupP_SendLineParsing(unittest.TestCase):
+    """BUG 1：CFNAI 負號解析；BUG 2：Regime 判定理由抽取。"""
+
+    # ── P1  BUG 1：負值 CFNAI 不再被解析為正值 ─────────────────────────────────
+
+    def test_P1_cfnai_negative_sign_preserved(self):
+        """
+        輸入  : Macro Growth (CFNAI) 欄位 = '-0.11  [Weak]  (月頻，2026-02-01，69d 前)'
+        預期  : build_line_message 的 Section 5 包含「放緩」，不含「溫和擴張」
+        Before fix: regex r'\\d+\\.?\\d*' 捕捉 '0.11' → _interp_cfnai 回傳「溫和擴張」(WRONG)
+        After fix : regex r'[+-]?\\d+\\.?\\d*' 捕捉 '-0.11' → 回傳「放緩」(CORRECT)
+        """
+        from report.send_line import build_line_message
+        md = _sl_md_cfnai("-0.11  [Weak]  (月頻，2026-02-01，69d 前)")
+        msg = build_line_message(md, date(2026, 4, 11))
+        self.assertIn("放緩", msg,
+            "CFNAI = -0.11 應解讀為「放緩」，sign 不應被截斷")
+        self.assertNotIn("溫和擴張", msg,
+            "CFNAI = -0.11 不應解讀為「溫和擴張」（正值行為）")
+
+    # ── P2  BUG 1：正值 CFNAI 仍正確解析 ─────────────────────────────────────
+
+    def test_P2_cfnai_positive_sign_preserved(self):
+        """
+        輸入  : CFNAI 欄位 = '+0.23  [Supportive]  (月頻，2026-02-01，69d 前)'
+        預期  : Section 5 包含「溫和擴張」（+0.23 → 0.10~0.70 區間）
+        回歸測試：確認 BUG 1 fix 不破壞正值解析。
+        """
+        from report.send_line import build_line_message
+        md = _sl_md_cfnai("+0.23  [Supportive]  (月頻，2026-02-01，69d 前)")
+        msg = build_line_message(md, date(2026, 4, 11))
+        self.assertIn("溫和擴張", msg,
+            "CFNAI = +0.23 應解讀為「溫和擴張」")
+
+    # ── P3  BUG 2：有 Regime section 時正確抽取 rationale ────────────────────
+
+    def test_P3_regime_rationale_extracted_when_present(self):
+        """
+        輸入  : ## 二、Regime 判定 區塊含 '> 市場無明確壓力訊號（regime_score=51.0）。'
+        預期  : build_line_message 的 '🔍 為何 Scenario' 段落包含 rationale 文字
+        Before fix: regex '> Scenario \\w+：' 找不到此格式 → N/A
+        After fix : section-scoped + '> ' blockquote 抽取 → 正確顯示
+        """
+        from report.send_line import build_line_message
+        rationale = "市場無明確壓力訊號（regime_score=51.0）。"
+        md = _sl_md_regime(rationale)
+        msg = build_line_message(md, date(2026, 4, 11))
+        # rationale 全文應出現在訊息中
+        self.assertIn(rationale, msg,
+            "Regime rationale 應出現在 LINE 訊息的 '為何 Scenario' 段落")
+        # 段落標題應存在
+        self.assertIn("🔍 為何 Scenario", msg,
+            "應存在 '🔍 為何 Scenario' 段落標題")
+
+    # ── P4  BUG 2：無 Regime section 時 fallback N/A 不拋例外 ─────────────────
+
+    def test_P4_regime_section_missing_fallback_no_crash(self):
+        """
+        輸入  : Markdown 不含 ## 二、Regime 判定 區塊
+        預期  : build_line_message 正常完成（不拋例外），'為何 Scenario' 段落仍存在
+        """
+        from report.send_line import build_line_message
+        md = "# 空報告\n\n無任何相關 section。\n"
+        try:
+            msg = build_line_message(md, date(2026, 4, 11))
+        except Exception as e:
+            self.fail(f"無 Regime section 時 build_line_message 不應拋例外：{e}")
+        self.assertIn("🔍 為何 Scenario", msg,
+            "即使無 Regime section，'🔍 為何 Scenario' 標題應仍存在")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
