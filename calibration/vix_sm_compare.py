@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 #   Elevated  : Raise all entry thresholds, longer fast-track gates → fewer FA, more late-detect.
 #   Sensitive : Lower all entry thresholds → more early warnings, expect more FA.
 #   Balanced  : Surgical: widen only caution band (main noise source) + cooldown + longer Panic hold.
+#   V6-V2NoConfirm : V2 base, remove confirm gate (upgrade_confirm_days=0).
+#     Original hypothesis: confirm=1 was V2's M3 blocker — disproved.
+#     M3 failure was a metric definition issue (Panic not counted as detection).
+#     After M3 fix (Def-or-higher), check whether V2 or V6 now clears all 6.
+#   V6b-V2CooldownPatch : V6 + downgrade_cooldown_days=2 as anti-flap fallback.
+#     Only added if V6 M2 Flapping exceeds limit. Single targeted patch.
 
 CANDIDATE_CONFIGS: Dict[str, VixSmConfig] = {
     "V1-Baseline": VixSmConfig(),
@@ -86,6 +92,28 @@ CANDIDATE_CONFIGS: Dict[str, VixSmConfig] = {
         upgrade_confirm_days     = 1,      # require 2 consecutive days for all upgrades
         downgrade_cooldown_days  = 3,      # 3-day cooldown after any downgrade
         panic_shock_1d           = 12.0,   # slightly harder fast-track
+    ),
+    "V6-V2NoConfirm": VixSmConfig(
+        # V2-WideHyst base with upgrade_confirm_days removed.
+        # Original intent: fix M3 DefLag by removing confirm gate.
+        # Diagnostic finding: M3 failure was a metric issue (old definition
+        # only counted Defensive entry, ignoring Panic fast-track as detection).
+        # After M3 metric fix, V2 may already pass — V6 retained for comparison.
+        caution_exit             = 16.0,
+        defensive_exit           = 22.0,
+        panic_exit               = 28.0,   # wide band shields M6: Japan VIX drops
+                                           # below 28 fast, overshoot estimated ~2d
+        upgrade_confirm_days     = 0,      # CHANGE vs V2: confirm gate removed
+    ),
+    "V6b-CooldownPatch": VixSmConfig(
+        # V6 + downgrade_cooldown_days=2 as anti-flap fallback.
+        # Added pre-emptively to test whether M2 Flapping can be held near V2
+        # levels if V6 alone shows flapping regression.
+        caution_exit             = 16.0,
+        defensive_exit           = 22.0,
+        panic_exit               = 28.0,
+        upgrade_confirm_days     = 0,
+        downgrade_cooldown_days  = 2,      # ADDITION vs V6: cooldown after downgrade
     ),
 }
 
@@ -130,8 +158,10 @@ def _check_shadow_mode(r: Dict) -> Dict[str, bool]:
     # M2: Flapping ≤ 15
     results["M2 Flapping<=15"]    = r["flapping"] <= 15
 
-    # M3: Defensive detection lag mean ≤ 5 calendar days (or no events = OK)
-    results["M3 DefLag<=5d"]      = _lag_ok("defensive", 5.0)
+    # M3: Defensive-or-higher detection lag mean <= 5 calendar days (or no events = OK)
+    # "detected" = SM first reaches Defensive OR Panic after VIX crosses defensive_entry.
+    # Entering Panic via fast-track counts as successful detection at Defensive level.
+    results["M3 Def+Lag<=5d"]     = _lag_ok("defensive", 5.0)
 
     # M4: 2023-SVB must not escalate beyond Caution
     max_s = svb_row.get("max_state", VixState.NORMAL) if not svb_row.empty else VixState.NORMAL
@@ -268,8 +298,8 @@ def build_comparison_table(
     lines.append(data_row("  Sticky days",
                            [results[n]["sticky_total"] for n in names]))
 
-    lines += [sep, "  LATE DETECTION (lag mean/max, calendar days)"]
-    for thr, label in [("defensive", "  Defensive"), ("panic", "  Panic")]:
+    lines += [sep, "  LATE DETECTION (lag mean/max, calendar days; Def row = Def-or-higher)"]
+    for thr, label in [("defensive", "  Def-or-higher"), ("panic", "  Panic")]:
         lines.append(data_row(label,
                                [_lag_str(results[n], thr) for n in names]))
 

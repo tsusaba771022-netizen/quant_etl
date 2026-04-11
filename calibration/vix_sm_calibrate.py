@@ -243,8 +243,19 @@ def compute_late_detection(
     For each threshold (caution/defensive/panic), find upward VIX crossings where
     SM hasn't yet entered the target state, and measure detection lag.
 
-    With adjacency rule, Panic detection lag matters most when starting from Normal
-    (requires 2–3 consecutive elevated days before SM reaches Panic).
+    Detection success definition (revised 2026-04-12):
+      "caution"  row : SM first reaches Caution or higher  (rank >= CAUTION)
+      "defensive" row: SM first reaches Defensive or higher (rank >= DEFENSIVE)
+      "panic"    row : SM first reaches Panic               (rank >= PANIC)
+
+    Rationale for "defensive" row change:
+      When fast-track fires from Caution, the SM jumps directly to Panic
+      (bypassing Defensive).  Under the old definition (target == Defensive
+      exactly) this was counted as a miss / long lag until SM descended back
+      through Defensive on the way down.  That misrepresents the FSM — entering
+      Panic means the risk level was detected and exceeded Defensive, so the
+      event should be marked detected with lag = (date reached Panic) - (cross
+      date), not with the return-path lag.
 
     Returns DataFrame with columns:
       threshold, events, detected, lag_mean, lag_p50, lag_max
@@ -282,11 +293,14 @@ def compute_late_detection(
 
         lags: List[int] = []
         for ci in crossings:
-            # Look for SM entry into target within 30 trading days
+            # Look for SM entry into target-or-higher within 30 trading days.
+            # "defensive" target: rank >= DEFENSIVE counts (Panic included).
+            # This ensures fast-track escalations are not penalised as misses.
             end_i   = min(ci + 30, len(trace))
             window  = trace.iloc[ci:end_i]
             entries = window[
-                (window["transitioned"]) & (window["state"] == target)
+                (window["transitioned"])
+                & (window["state"].map(STATE_RANK) >= STATE_RANK[target])
             ]
             if not entries.empty:
                 lag = (entries.index[0] - trace.index[ci]).days
