@@ -2184,5 +2184,69 @@ class TestGroupP_SendLineParsing(unittest.TestCase):
             "即使無 Regime section，'🔍 為何 Scenario' 標題應仍存在")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Group Q  validation/checks.py VOO proxy mapping fix
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupQ_ValidationProxyMapping(unittest.TestCase):
+    """BUG 3：PROXY_SYMBOLS['VOO'] 指向 ('SPY','NYSE')，但 SPY 在 DB 中
+    exchange='NYSE Arca'，導致 validation 查詢 0 rows → false FAIL。
+    修正後改為 ('VOO','NYSE')，直接驗 VOO 本身。"""
+
+    # ── Q1  VOO entry 指向 VOO 而非 SPY ──────────────────────────────────────
+
+    def test_Q1_voo_proxy_points_to_voo_not_spy(self):
+        """PROXY_SYMBOLS['VOO'] 的 symbol 欄位必須是 'VOO'，不得是 'SPY'。
+        SPY 在 DB 中 exchange='NYSE Arca'（yfinance 真實值），
+        用 ('SPY','NYSE') 查詢永遠 0 rows → validation false FAIL。"""
+        from validation.checks import PROXY_SYMBOLS
+        symbol, exchange = PROXY_SYMBOLS["VOO"]
+        self.assertEqual(symbol, "VOO",
+            f"PROXY_SYMBOLS['VOO'] symbol 應為 'VOO'，實際為 '{symbol}'。"
+            "用 SPY 會因 exchange='NYSE Arca' 不符造成 false FAIL。")
+
+    # ── Q2  VOO entry 的 exchange 與 etl/config.py SSOT 一致 ─────────────────
+
+    def test_Q2_voo_exchange_matches_etl_config(self):
+        """PROXY_SYMBOLS['VOO'] 的 exchange 應與 etl/config.MARKET_SYMBOLS['VOO']
+        的 exchange 欄位一致，確保 validation 與 ETL 同一 SSOT。"""
+        from validation.checks import PROXY_SYMBOLS
+        from etl.config import MARKET_SYMBOLS
+        _, val_exchange = PROXY_SYMBOLS["VOO"]
+        etl_exchange = MARKET_SYMBOLS["VOO"].exchange
+        self.assertEqual(val_exchange, etl_exchange,
+            f"validation exchange='{val_exchange}' 與 etl/config exchange='{etl_exchange}' 不一致")
+
+    # ── Q3  其他資產 proxy 映射不受影響 ──────────────────────────────────────
+
+    def test_Q3_other_proxy_entries_unchanged(self):
+        """QQQM/SMH/2330.TW/VIX 的 proxy 映射應維持原值，本輪只改 VOO。"""
+        from validation.checks import PROXY_SYMBOLS
+        expected = {
+            "QQQM":    ("QQQ",     "NASDAQ"),
+            "SMH":     ("SOXX",    "NASDAQ"),
+            "2330.TW": ("2330.TW", "TWSE"),
+            "VIX":     ("^VIX",    "CBOE"),
+        }
+        for target, (exp_sym, exp_exch) in expected.items():
+            actual_sym, actual_exch = PROXY_SYMBOLS[target]
+            self.assertEqual(actual_sym, exp_sym,
+                f"PROXY_SYMBOLS['{target}'] symbol 不應改動：expected={exp_sym}, actual={actual_sym}")
+            self.assertEqual(actual_exch, exp_exch,
+                f"PROXY_SYMBOLS['{target}'] exchange 不應改動：expected={exp_exch}, actual={actual_exch}")
+
+    # ── Q4  gap check filter 現在命中 VOO（而非 SPY）───────────────────────────
+
+    def test_Q4_gap_check_filter_includes_voo(self):
+        """checks.py:212 的 gap filter 用 [v[0] for v in PROXY_SYMBOLS.values()]
+        取得 proxy symbol 清單。修正後該清單應含 'VOO' 而非 'SPY'。"""
+        from validation.checks import PROXY_SYMBOLS
+        proxy_symbols = [v[0] for v in PROXY_SYMBOLS.values()]
+        self.assertIn("VOO", proxy_symbols,
+            "gap check filter 應包含 'VOO'（修正後）")
+        self.assertNotIn("SPY", proxy_symbols,
+            "gap check filter 不應包含 'SPY'（已被 'VOO' 取代）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

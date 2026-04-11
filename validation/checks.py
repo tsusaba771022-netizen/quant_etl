@@ -76,7 +76,7 @@ MIN_REGIME_ROWS      = 30        # engine_regime_log 最少筆數
 
 # 核心資產 proxy（與 ETL config 對應）
 PROXY_SYMBOLS = {
-    "VOO":     ("SPY",     "NYSE"),
+    "VOO":     ("VOO",     "NYSE"),    # VOO 直接在 DB；SPY exchange='NYSE Arca'（yfinance 真實值），避免漂移
     "QQQM":    ("QQQ",     "NASDAQ"),
     "SMH":     ("SOXX",    "NASDAQ"),
     "2330.TW": ("2330.TW", "TWSE"),
