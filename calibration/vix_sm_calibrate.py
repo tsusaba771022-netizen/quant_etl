@@ -25,19 +25,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from engine.vix_sm import VixState, VixSmConfig, evaluate_next_state
+from engine.vix_sm import VixState, VixSmConfig, STATE_RANK, evaluate_next_state
 from calibration.vix_data import load_vix
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level constants ────────────────────────────────────────────────────
-
-STATE_RANK: Dict[str, int] = {
-    VixState.NORMAL:    0,
-    VixState.CAUTION:   1,
-    VixState.DEFENSIVE: 2,
-    VixState.PANIC:     3,
-}
 
 # Differentiated false alarm lookback windows (trading days after state entry)
 # Caution   : brief spikes above 20 that resolve quickly = noisy signal
@@ -84,9 +77,11 @@ def run_sm_on_series(
       reason, fast_track
     """
     records: List[Dict[str, Any]] = []
-    state = initial_state
-    hold  = 1
-    buf:  List[float] = []
+    state    = initial_state
+    hold     = 1
+    buf:     List[float] = []
+    consec   = 0   # consecutive days above next-level threshold
+    cooldown = 0   # days remaining in downgrade cooldown
 
     for date_val, vix_val in vix_series.items():
         if pd.isna(vix_val):
@@ -97,20 +92,24 @@ def run_sm_on_series(
         if len(buf) > _HIST_WINDOW:
             buf = buf[-_HIST_WINDOW:]
 
-        out = evaluate_next_state(state, list(buf), hold, cfg)
+        out = evaluate_next_state(state, list(buf), hold, cfg, consec, cooldown)
         records.append({
-            "date":          date_val,
-            "vix":           float(vix_val),
-            "state":         out.state,
-            "prev_state":    out.prev_state,
-            "transitioned":  out.transitioned,
-            "days_in_state": out.days_in_state,
-            "vix_enum":      out.vix_enum,
-            "reason":        out.reason,
-            "fast_track":    "fast-track" in out.reason,
+            "date":              date_val,
+            "vix":               float(vix_val),
+            "state":             out.state,
+            "prev_state":        out.prev_state,
+            "transitioned":      out.transitioned,
+            "days_in_state":     out.days_in_state,
+            "vix_enum":          out.vix_enum,
+            "reason":            out.reason,
+            "fast_track":        "fast-track" in out.reason,
+            "consecutive_above": out.consecutive_above,
+            "cooldown_remaining": out.cooldown_remaining,
         })
-        state = out.state
-        hold  = out.days_in_state
+        state    = out.state
+        hold     = out.days_in_state
+        consec   = out.consecutive_above
+        cooldown = out.cooldown_remaining
 
     if not records:
         return pd.DataFrame()
@@ -305,6 +304,21 @@ def compute_late_detection(
     return pd.DataFrame(rows)
 
 
+def compute_sticky_total(trace: pd.DataFrame, cfg: VixSmConfig) -> int:
+    """
+    Total trading days where SM is in an elevated state but VIX is already
+    below the exit threshold — proxy for 'sticky too long' across all 2079 days.
+    """
+    if trace.empty:
+        return 0
+    mask = (
+        ((trace["state"] == VixState.CAUTION)   & (trace["vix"] < cfg.caution_exit)) |
+        ((trace["state"] == VixState.DEFENSIVE)  & (trace["vix"] < cfg.defensive_exit)) |
+        ((trace["state"] == VixState.PANIC)      & (trace["vix"] < cfg.panic_exit))
+    )
+    return int(mask.sum())
+
+
 def compute_flapping(trace: pd.DataFrame) -> int:
     """
     Count A→B→A back-and-forth transitions within FLAP_WINDOW trading days.
@@ -471,6 +485,9 @@ def _fmt(report: Dict) -> str:
 
     lines += [
         "",
+        "── Sticky Total (SM elevated, VIX already below exit threshold) ─────",
+        f"  Sticky days (global, all 2079d): {report['sticky_total']}",
+        "",
         f"── Flapping (A→B→A within {FLAP_WINDOW}d) "
         f"─────────────────────────────────────",
         f"  Flapping transitions: {report['flapping']}",
@@ -519,23 +536,25 @@ def run_calibration(
 
     state_dist = compute_state_distribution(trace)
     time_dist  = compute_time_in_state_distribution(trace)
-    fa         = compute_false_alarms(trace, cfg)
-    late_det   = compute_late_detection(trace, cfg)
-    flapping   = compute_flapping(trace)
-    episode_df = compute_per_episode(trace, cfg)
+    fa           = compute_false_alarms(trace, cfg)
+    late_det     = compute_late_detection(trace, cfg)
+    flapping     = compute_flapping(trace)
+    episode_df   = compute_per_episode(trace, cfg)
+    sticky_total = compute_sticky_total(trace, cfg)
 
     report_dict = {
-        "cfg":        cfg,
-        "start":      start,
-        "end":        end_date,
-        "n_days":     len(trace),
-        "trace":      trace,
-        "state_dist": state_dist,
-        "time_dist":  time_dist,
+        "cfg":          cfg,
+        "start":        start,
+        "end":          end_date,
+        "n_days":       len(trace),
+        "trace":        trace,
+        "state_dist":   state_dist,
+        "time_dist":    time_dist,
         "false_alarms": fa,
-        "late_det":   late_det,
-        "flapping":   flapping,
-        "episode_df": episode_df,
+        "late_det":     late_det,
+        "flapping":     flapping,
+        "episode_df":   episode_df,
+        "sticky_total": sticky_total,
     }
     report_dict["text"] = _fmt(report_dict)
     return report_dict
