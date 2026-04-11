@@ -1,0 +1,44 @@
+{
+  "V2-WideHyst": {
+    "state": "Caution",
+    "hold_days": 3,
+    "consecutive_above": 0,
+    "cooldown_remaining": 0,
+    "last_date": "2026-04-10",
+    "vix_buffer": [
+      24.17,
+      25.78,
+      21.04,
+      19.49,
+      19.23
+    ]
+  },
+  "V6-NoConfirm": {
+    "state": "Caution",
+    "hold_days": 3,
+    "consecutive_above": 0,
+    "cooldown_remaining": 0,
+    "last_date": "2026-04-10",
+    "vix_buffer": [
+      24.17,
+      25.78,
+      21.04,
+      19.49,
+      19.23
+    ]
+  },
+  "V6b-CooldownPatch": {
+    "state": "Caution",
+    "hold_days": 3,
+    "consecutive_above": 0,
+    "cooldown_remaining": 0,
+    "last_date": "2026-04-10",
+    "vix_buffer": [
+      24.17,
+      25.78,
+      21.04,
+      19.49,
+      19.23
+    ]
+  }
+}

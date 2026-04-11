@@ -1,0 +1,1 @@
+date,config_name,vix_close,vix_pct_rank,shock_1d,accel_3d,prev_state,new_state,transitioned,driver,driver_detail,days_in_state,cooldown_remaining,is_divergence_vs_baseline,divergence_type
