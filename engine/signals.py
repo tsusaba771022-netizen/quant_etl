@@ -121,7 +121,7 @@ class SignalEngine:
         if fk:
             parts.append("⚠️ falling knife detected")
         if "ISM_PMI_MFG" in regime.missing:
-            parts.append("ISM_PMI_MFG=N/A")
+            parts.append("CFNAI=N/A")
 
         metadata = {
             "close":       ad.close,
