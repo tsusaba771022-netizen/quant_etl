@@ -111,6 +111,11 @@ def _kv_wrap(label: str, value: str, val_color: str = _VALUE) -> dict:
     }
 
 
+def _with_enum(val: str, enum_tag: str) -> str:
+    """若 enum_tag 有效，附加於 val 後；否則回傳原值。"""
+    return f"{val}  {enum_tag}" if enum_tag and enum_tag != "N/A" else val
+
+
 def _z_color(z_text: str) -> str:
     """依 Z-Score 值返回顏色：abs<1 → 綠，1-2 → 琥珀，≥2 → 紅。"""
     m = re.search(r'([+-]?\d+\.\d+)', z_text)
@@ -153,8 +158,24 @@ def _parse(md_text: str) -> dict:
     p["hy_oas"]  = _pick(r'\|\s*HY OAS 信用利差\s*\|\s*([\d.]+%)',       md_text)
     p["spread"]  = _pick(r'\|\s*10Y-2Y 利差\s*\|\s*([+\-\d.]+%)',        md_text)
     pmi_raw      = _pick(r'\|\s*Macro Growth \(CFNAI\)\s*\|\s*([^|\n]+)',  md_text)
-    _pmi_num     = re.search(r'\d+\.?\d*', pmi_raw)
+    _pmi_num     = re.search(r'[+-]?\d+\.?\d*', pmi_raw)   # fix: preserve sign
     p["pmi"]     = _pmi_num.group(0) if _pmi_num else "N/A"
+
+    # L1 決策摘要（section-scoped，避免跨段污染）
+    _l1_m             = re.search(r'## 決策摘要[\s\S]+?(?=\n---)', md_text)
+    _l1               = _l1_m.group(0) if _l1_m else ""
+    p["tactical_dir"] = _pick(r'\|\s*\*\*戰術指令\*\*\s*\|\s*\*\*([^*|]+)\*\*', _l1)
+    p["core_driver"]  = _pick(r'\|\s*\*\*核心驅動\*\*\s*\|\s*([^|]+)', _l1).strip()
+    p["conf_reason"]  = _pick(r'\|\s*\*\*信心度\*\*\s*\|\s*[^|\n]*—\s*([^|]+)', _l1).strip()
+
+    # L3 系統工程狀態
+    p["sys_status"]   = _pick(r'\*\*(🟢 Healthy|🟡 Degraded|🔴 Partial)\*\*', md_text)
+
+    # 狀態 enum 標籤（## 一，供 RISK SNAPSHOT 顯示）
+    p["vix_enum"]    = _pick(r'\|\s*VIX 波動指數\s*\|\s*[\d.]+\s+(\[[^\]]+\])', md_text)
+    p["hy_enum"]     = _pick(r'\|\s*HY OAS 信用利差\s*\|\s*[\d.]+%\s+(\[[^\]]+\])', md_text)
+    p["spread_enum"] = _pick(r'\|\s*10Y-2Y 利差\s*\|\s*[+\-\d.]+%\s+(\[[^\]]+\])', md_text)
+    p["cfnai_enum"]  = _pick(r'\|\s*Macro Growth \(CFNAI\)\s*\|\s*[+\-\d.]+\s+(\[[^\]]+\])', md_text)
 
     # 操作建議
     p["op_summary"] = _pick(r'四、今日操作建議[\s\S]{0,50}>\s*([^\n>][^\n]+)', md_text)
@@ -242,6 +263,27 @@ def build_line_flex_payload(md_text: str, report_date: date) -> dict:
         ],
     }
 
+    # ── DECISION CORE section（僅在 tactical_dir 有效時插入）────────────────
+    _conf_val = p["confidence"]
+    if p.get("conf_reason") and p["conf_reason"] not in ("", "N/A"):
+        _conf_val = f"{p['confidence']} — {p['conf_reason']}"
+    decision: list = []
+    if p.get("tactical_dir") and p["tactical_dir"] != "N/A":
+        decision = [
+            _sep(),
+            _section_label("DECISION CORE"),
+            {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    _kv("Directive",  p["tactical_dir"],              _WHITE),
+                    _kv_wrap("Confidence", _conf_val,                 _MUTED),
+                    _kv("Driver",     p.get("core_driver", "N/A"),    _VALUE),
+                ],
+                "margin": "sm",
+            },
+        ]
+
     # ── Section 2: Allocation ─────────────────────────────────────────────
     alloc = [
         _sep(),
@@ -292,10 +334,10 @@ def build_line_flex_payload(md_text: str, report_date: date) -> dict:
             "type": "box",
             "layout": "vertical",
             "contents": [
-                _kv("VIX",    vix_display, _VALUE, lf=3, vf=6),
-                _kv("HY OAS", p["hy_oas"], _VALUE, lf=3, vf=6),
-                _kv("Spread", p["spread"], _VALUE, lf=3, vf=6),
-                _kv("CFNAI",  p["pmi"],    _VALUE, lf=3, vf=6),
+                _kv("VIX",    _with_enum(vix_display,  p["vix_enum"]),    _VALUE, lf=3, vf=6),
+                _kv("HY OAS", _with_enum(p["hy_oas"],  p["hy_enum"]),     _VALUE, lf=3, vf=6),
+                _kv("Spread", _with_enum(p["spread"],  p["spread_enum"]), _VALUE, lf=3, vf=6),
+                _kv("CFNAI",  _with_enum(p["pmi"],     p["cfnai_enum"]),  _VALUE, lf=3, vf=6),
             ],
             "margin": "sm",
         },
@@ -341,6 +383,7 @@ def build_line_flex_payload(md_text: str, report_date: date) -> dict:
         "paddingAll": "md",
         "contents": (
             [badge_box, conclusion_card]
+            + decision
             + alloc
             + zscore
             + risk
@@ -356,7 +399,12 @@ def build_line_flex_payload(md_text: str, report_date: date) -> dict:
     if p["ffill"]:
         notes.append(p["ffill"])
     if p["confidence"] != "High":
-        notes.append(f"Confidence {p['confidence']}：部分指標缺失，供參考")
+        cr = p.get("conf_reason", "")
+        reason = cr if cr and cr != "N/A" else "部分指標缺失"
+        notes.append(f"Confidence {p['confidence']}：{reason}")
+    sys_st = p.get("sys_status", "N/A")
+    if sys_st not in ("N/A", "🟢 Healthy"):
+        notes.append(sys_st)
 
     footer = None
     if notes:

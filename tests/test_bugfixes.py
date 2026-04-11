@@ -565,6 +565,9 @@ class TestRegression(unittest.TestCase):
             "sc_change", "risk_drivers",
             "vix_z", "hy_z", "spread_z", "z_signal",
             "missing", "ffill",
+            # Round 2 新增欄位（L1/L3 對齊）
+            "tactical_dir", "core_driver", "conf_reason", "sys_status",
+            "vix_enum", "hy_enum", "spread_enum", "cfnai_enum",
         }
         md = _make_full_md()
         p = _parse(md)
@@ -678,9 +681,9 @@ class TestDryRunAndTestPush(unittest.TestCase):
         from report.line_flex import _parse
         md = _make_scenario_md("normal", date(2026, 4, 10))
         p  = _parse(md)
-        # P3-2：模板值已更新為 CFNAI 量級（+0.23），regex 取數字部分 = "0.23"
-        self.assertEqual(p["pmi"], "0.23",
-            "CFNAI 模板值應為 CFNAI 量級（+0.23），regex 提取數字部分 = '0.23'")
+        # sign fix 後 regex 保留符號：+0.23 → "+0.23"
+        self.assertEqual(p["pmi"], "+0.23",
+            "CFNAI 模板值應為 CFNAI 量級（+0.23），sign fix 後 = '+0.23'")
         self.assertIn("🟡", p["z_signal"], "normal 情境應為黃燈")
         self.assertEqual(p["scenario"], "B")
 
@@ -690,9 +693,9 @@ class TestDryRunAndTestPush(unittest.TestCase):
         from report.line_flex import _parse
         md = _make_scenario_md("hy-red", date(2026, 4, 10))
         p  = _parse(md)
-        # P3-2：模板值已更新為 CFNAI 量級（-0.15），regex 取數字部分 = "0.15"
-        self.assertEqual(p["pmi"], "0.15",
-            "CFNAI 模板值應為 CFNAI 量級（-0.15），regex 提取數字部分 = '0.15'")
+        # sign fix 後 regex 保留符號：-0.15 → "-0.15"
+        self.assertEqual(p["pmi"], "-0.15",
+            "CFNAI 模板值應為 CFNAI 量級（-0.15），sign fix 後 = '-0.15'")
         self.assertIn("🔴",    p["z_signal"], "hy-red 情境 z_signal 應為紅燈")
         self.assertIn("HY OAS", p["z_signal"], "z_signal 應點名 HY OAS")
         self.assertEqual(p["scenario"], "C")
@@ -703,9 +706,9 @@ class TestDryRunAndTestPush(unittest.TestCase):
         from report.line_flex import _parse
         md = _make_scenario_md("pmi-missing", date(2026, 4, 10))
         p  = _parse(md)
-        # P3-2：模板值已更新為 CFNAI 量級（+0.23），regex 提取 "0.23"
-        self.assertEqual(p["pmi"], "0.23",
-            "CFNAI 當日缺值但有前值時，應顯示沿用的有效 CFNAI 值，不應為 N/A")
+        # sign fix 後：+0.23 → "+0.23"
+        self.assertEqual(p["pmi"], "+0.23",
+            "CFNAI 當日缺值但有前值時，應顯示沿用的有效 CFNAI 值（sign fix 後含符號），不應為 N/A")
         self.assertIn("🟢", p["z_signal"], "pmi-missing 情境 z_signal 應為綠燈")
 
     # ── E-4  _inject_test_banner 注入正確 ─────────────────────────────────────
@@ -2246,6 +2249,242 @@ class TestGroupQ_ValidationProxyMapping(unittest.TestCase):
             "gap check filter 應包含 'VOO'（修正後）")
         self.assertNotIn("SPY", proxy_symbols,
             "gap check filter 不應包含 'SPY'（已被 'VOO' 取代）")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group R  line_flex.py Round 2 Flex 對齊（L1/L3 欄位 + DECISION CORE）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _flex_md_full() -> str:
+    """含新版 L1 決策摘要、## 一 enum 標籤、## 系統工程狀態的最小完整 markdown。"""
+    return """\
+# 每日投資組合報告
+
+> **分析日期**：2026-04-11　｜　**Scenario**：Neutral　｜　**Confidence**：🟡 Medium
+>
+> ℹ️ CFNAI 月頻，距今 69 天
+
+**今日結論：維持 VOO 70%，戰術倉全數觀望，現金 30%。**
+
+---
+
+## 決策摘要
+
+| 項目 | 狀態 |
+|------|------|
+| **Regime** | 🟦 Neutral — 市場平靜，持倉觀察 |
+| **信心度** | 🟡 Medium  —  CFNAI 月頻，距今 69 天 |
+| **核心驅動** | CFNAI [Weak] |
+| **戰術指令** | **Freeze Add** |
+| **現金** | 30.0% |
+
+> CFNAI -0.11（月頻，2026-02-01）
+> 目前無 BUY 訊號：維持現有部位，等待下一個確認。
+
+---
+
+## 一、宏觀市場指標
+
+| 指標 | 數值 |
+|------|------|
+| Macro Growth (CFNAI) | -0.11  [Weak]  (月頻，2026-02-01，69d 前) |
+| HY OAS 信用利差 | 2.90%  [Tight] |
+| 10Y-2Y 利差 | +0.51%  [Flat] |
+| VIX 波動指數 | 19.5  [Normal] |
+| VIX 百分位 (252日) | 66.7% |
+
+## 一-B、標準化風險座標（Rolling Z-Score 252日）
+
+| 指標 | Z-Score 解讀 |
+|------|-------------|
+| VIX（波動率） | +0.08  🟢 正常範圍（±1σ） |
+| HY OAS（信用利差） | -6.22  🔴 極端低（<-3σ） |
+| 10Y-2Y 利差 | -0.72  🟢 正常範圍（±1σ） |
+
+**Z-Score 風險燈號**
+
+- 🟢 正常｜主要風險指標仍在可接受範圍內。
+> ⚠️ 此燈號為標準化指標的平行觀察層，不取代目前 Scenario A/B/C 判定。
+
+---
+
+## 今日目標配置
+
+| 標的 | 配置比例 |
+|------|---------|
+| VOO | **70.0%** |
+| QQQM | **0.0%** |
+| SMH | **0.0%** |
+| 2330.TW | **0.0%** |
+| 現金 | **30.0%** |
+
+## 四、今日操作建議
+
+> 宏觀無明確壓力，戰術部位視個別訊號調整，不需大幅異動。
+
+**VOO（核心）**：維持 70% 目標，若因市場波動偏離超過 ±3% 則再平衡。
+**QQQM（戰術）**：🟡 WAIT — 暫停加碼，等待動能確認後再布局。
+**SMH（戰術）**：🟡 WAIT — 暫停加碼，等待動能確認後再布局。
+**2330.TW（戰術）**：🟡 WAIT — 暫停加碼，等待動能確認後再布局。
+
+## 五、與昨日相比
+
+| 項目 | 變動 |
+|------|------|
+| Scenario：B → **Neutral**（惡化 ⬇️） | |
+| 主要驅動因子 | 主要指標無顯著變動 |
+
+## 系統工程狀態
+
+> ℹ️ 工程資訊，不影響上方決策摘要方向。
+
+**🟡 Degraded**
+　主要原因：CFNAI 月頻，距今 69 天
+
+---
+"""
+
+
+def _flex_md_healthy() -> str:
+    """Confidence=High / sys_status=Healthy 的最小 markdown，用於驗證 footer 靜默。"""
+    return """\
+## 一、宏觀市場指標
+
+| 指標 | 數值 |
+|------|------|
+| Macro Growth (CFNAI) | +0.50  [Supportive]  (月頻，2026-02-01，10d 前) |
+| HY OAS 信用利差 | 3.50%  [Normal] |
+| 10Y-2Y 利差 | +1.80%  [Healthy] |
+| VIX 波動指數 | 14.0  [Low] |
+| VIX 百分位 (252日) | 20.0% |
+
+## 系統工程狀態
+
+> ℹ️ 工程資訊，不影響上方決策摘要方向。
+
+**🟢 Healthy**
+
+---
+"""
+
+
+class TestGroupR_LineFlex_Round2(unittest.TestCase):
+    """Round 2 Flex 對齊：DECISION CORE section、L1/L3 欄位解析、footer 更新。"""
+
+    # ── R1  _parse() 正確抽取 L1 欄位 ────────────────────────────────────────
+
+    def test_R1_parse_extracts_l1_fields(self):
+        """_parse() 從 ## 決策摘要 正確抽取 tactical_dir / core_driver / conf_reason。"""
+        from report.line_flex import _parse
+        p = _parse(_flex_md_full())
+        self.assertEqual(p["tactical_dir"], "Freeze Add",
+            f"tactical_dir 應為 'Freeze Add'，實際：{p['tactical_dir']!r}")
+        self.assertEqual(p["core_driver"], "CFNAI [Weak]",
+            f"core_driver 應為 'CFNAI [Weak]'，實際：{p['core_driver']!r}")
+        self.assertIn("CFNAI", p["conf_reason"],
+            f"conf_reason 應含 'CFNAI'，實際：{p['conf_reason']!r}")
+
+    # ── R2  _parse() 正確抽取 sys_status ────────────────────────────────────
+
+    def test_R2_parse_extracts_sys_status_degraded(self):
+        """_parse() 正確抽取 🟡 Degraded sys_status。"""
+        from report.line_flex import _parse
+        p = _parse(_flex_md_full())
+        self.assertEqual(p["sys_status"], "🟡 Degraded",
+            f"sys_status 應為 '🟡 Degraded'，實際：{p['sys_status']!r}")
+
+    def test_R2b_parse_extracts_sys_status_healthy(self):
+        """_parse() 正確抽取 🟢 Healthy sys_status。"""
+        from report.line_flex import _parse
+        p = _parse(_flex_md_healthy())
+        self.assertEqual(p["sys_status"], "🟢 Healthy",
+            f"sys_status 應為 '🟢 Healthy'，實際：{p['sys_status']!r}")
+
+    # ── R3  _parse() 正確抽取 enum 標籤 ─────────────────────────────────────
+
+    def test_R3_parse_extracts_enum_tags(self):
+        """_parse() 從 ## 一 欄位抽取 vix/hy/spread/cfnai enum 標籤。"""
+        from report.line_flex import _parse
+        p = _parse(_flex_md_full())
+        self.assertEqual(p["vix_enum"],    "[Normal]",  f"vix_enum={p['vix_enum']!r}")
+        self.assertEqual(p["hy_enum"],     "[Tight]",   f"hy_enum={p['hy_enum']!r}")
+        self.assertEqual(p["spread_enum"], "[Flat]",    f"spread_enum={p['spread_enum']!r}")
+        self.assertEqual(p["cfnai_enum"],  "[Weak]",    f"cfnai_enum={p['cfnai_enum']!r}")
+
+    # ── R4  _parse() pmi 符號修復（同源 BUG 1）──────────────────────────────
+
+    def test_R4_parse_pmi_sign_preserved(self):
+        """line_flex._parse() pmi 欄位應保留負號（-0.11，非 0.11）。"""
+        from report.line_flex import _parse
+        p = _parse(_flex_md_full())
+        self.assertEqual(p["pmi"], "-0.11",
+            f"pmi 應為 '-0.11'（符號保留），實際：{p['pmi']!r}")
+
+    # ── R5  DECISION CORE section 在 tactical_dir 有效時出現 ─────────────────
+
+    def test_R5_decision_core_section_present_when_valid(self):
+        """build_line_flex_payload() 含 ## 決策摘要 時，body 應有 DECISION CORE section。"""
+        from report.line_flex import build_line_flex_payload
+        payload = build_line_flex_payload(_flex_md_full(), date(2026, 4, 11))
+        body_json = str(payload["contents"]["body"])
+        self.assertIn("DECISION CORE", body_json,
+            "body 應含 'DECISION CORE' section label")
+        self.assertIn("Directive", body_json,
+            "DECISION CORE 應含 'Directive' 列")
+        self.assertIn("Driver", body_json,
+            "DECISION CORE 應含 'Driver' 列")
+
+    # ── R6  DECISION CORE section 在無 ## 決策摘要 時不渲染 ──────────────────
+
+    def test_R6_decision_core_absent_when_no_section(self):
+        """無 ## 決策摘要（tactical_dir=N/A）時，body 不應有 DECISION CORE section。"""
+        from report.line_flex import build_line_flex_payload
+        md = "# 無 decision 的舊版報告\n\n無任何相關 section。\n"
+        payload = build_line_flex_payload(md, date(2026, 4, 11))
+        body_json = str(payload["contents"]["body"])
+        self.assertNotIn("DECISION CORE", body_json,
+            "無 tactical_dir 時不應渲染 DECISION CORE section")
+
+    # ── R7  footer 在 Degraded 時含 sys_status ───────────────────────────────
+
+    def test_R7_footer_contains_sys_status_when_degraded(self):
+        """Degraded sys_status 應出現在 footer notes 中。"""
+        from report.line_flex import build_line_flex_payload
+        payload = build_line_flex_payload(_flex_md_full(), date(2026, 4, 11))
+        footer = payload["contents"].get("footer")
+        self.assertIsNotNone(footer, "Degraded 時應有 footer")
+        footer_text = str(footer)
+        self.assertIn("Degraded", footer_text,
+            "footer 應包含 'Degraded' sys_status")
+
+    # ── R8  footer 在 Healthy 時不含 sys_status ──────────────────────────────
+
+    def test_R8_footer_silent_when_healthy(self):
+        """🟢 Healthy 時，footer 不應顯示工程狀態資訊。"""
+        from report.line_flex import build_line_flex_payload
+        payload = build_line_flex_payload(_flex_md_healthy(), date(2026, 4, 11))
+        footer = payload["contents"].get("footer")
+        # footer 可能不存在（無其他 notes），或存在但不含 Healthy / sys_status
+        if footer:
+            footer_text = str(footer)
+            self.assertNotIn("Healthy", footer_text,
+                "footer 不應顯示 🟢 Healthy 工程狀態")
+
+    # ── R9  新欄位缺席時 fallback N/A 且不 crash ─────────────────────────────
+
+    def test_R9_new_fields_fallback_na_no_crash(self):
+        """無任何新版 section 的最小 markdown，所有新欄位應 fallback N/A 且不拋例外。"""
+        from report.line_flex import _parse, build_line_flex_payload
+        md = "# 空報告\n\n無任何相關 section。\n"
+        try:
+            p = _parse(md)
+            build_line_flex_payload(md, date(2026, 4, 11))
+        except Exception as e:
+            self.fail(f"舊版 markdown 不應讓 line_flex 拋例外：{e}")
+        for key in ("tactical_dir", "core_driver", "conf_reason",
+                    "sys_status", "vix_enum", "hy_enum", "spread_enum", "cfnai_enum"):
+            self.assertEqual(p[key], "N/A",
+                f"缺少對應 section 時 {key!r} 應 fallback 'N/A'，實際：{p[key]!r}")
 
 
 if __name__ == "__main__":
