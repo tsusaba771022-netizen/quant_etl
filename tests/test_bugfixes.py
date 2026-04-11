@@ -1746,26 +1746,30 @@ class TestGroupK_CfnaiStaticValidation(unittest.TestCase):
     # ── K8  _interp_cfnai + _cfnai_status classify 0.23 / -0.15 consistently ─
 
     def test_K8_cfnai_interpretation_consistency(self):
-        """_interp_cfnai('+0.23') 應包含「溫和擴張」；
-        _cfnai_status(0.23) 應包含「溫和擴張」。
-        _interp_cfnai('-0.15') 應包含「放緩」；
-        _cfnai_status(-0.15) 應包含「放緩」。"""
+        """_cfnai_status() 現在使用英文 enum tag。
+        0.23 → [Supportive]；-0.15 → [Weak]。
+        _interp_cfnai() 在 send_line.py 仍維持中文解讀文字（不受本輪改動影響）。
+        兩者均應包含代表「溫和擴張/放緩」語意的核心詞。"""
         from report.send_line import _interp_cfnai
         from report.daily_report import _cfnai_status
 
-        interp_pos = _interp_cfnai("+0.23")
+        # _cfnai_status：改為 enum tag 格式，驗證正確 tag
         status_pos = _cfnai_status(0.23)
+        self.assertIn("[Supportive]", status_pos,
+            f"_cfnai_status(0.23) 應含 '[Supportive]'，實際 = {status_pos!r}")
+
+        status_neg = _cfnai_status(-0.15)
+        self.assertIn("[Weak]", status_neg,
+            f"_cfnai_status(-0.15) 應含 '[Weak]'，實際 = {status_neg!r}")
+
+        # _interp_cfnai（send_line.py）維持中文，不受本輪改動影響
+        interp_pos = _interp_cfnai("+0.23")
         self.assertIn("溫和擴張", interp_pos,
             f"_interp_cfnai('+0.23') 應含「溫和擴張」，實際 = {interp_pos!r}")
-        self.assertIn("溫和擴張", status_pos,
-            f"_cfnai_status(0.23) 應含「溫和擴張」，實際 = {status_pos!r}")
 
         interp_neg = _interp_cfnai("-0.15")
-        status_neg = _cfnai_status(-0.15)
         self.assertIn("放緩", interp_neg,
             f"_interp_cfnai('-0.15') 應含「放緩」，實際 = {interp_neg!r}")
-        self.assertIn("放緩", status_neg,
-            f"_cfnai_status(-0.15) 應含「放緩」，實際 = {status_neg!r}")
 
     # ── K9  ZSCORE_TARGETS label uses CFNAI, not ISM PMI Manufacturing ───────
 

@@ -104,42 +104,230 @@ def _fmt(val, fmt_str: str, suffix: str = "", na: str = "N/A") -> str:
     return f"{val:{fmt_str}}{suffix}"
 
 
-def _cfnai_status(val) -> str:
-    # CFNAI: 0 = historical avg; >+0.70 = above-trend; <-0.70 = recession risk onset
+def _cfnai_status(val, ism_pmi_date=None, as_of=None) -> str:
+    """CFNAI 狀態 enum。date 參數由 _macro_section 傳入，用於在 cell 內嵌入月頻日期資訊。"""
     if val is None:
-        return "N/A ⚠️"
-    if val >= 0.70:   return f"{val:+.2f}  📈 高於趨勢成長 (>+0.7)"
-    if val >= 0.10:   return f"{val:+.2f}  📊 溫和擴張"
-    if val >= -0.10:  return f"{val:+.2f}  📊 接近均值"
-    if val >= -0.70:  return f"{val:+.2f}  📉 放緩"
-    return                f"{val:+.2f}  ⚠️ 衰退風險 (<-0.7)"
+        return "N/A  [缺失]"
+    if val >= 0.70:    enum = "Strong"
+    elif val >= 0.10:  enum = "Supportive"
+    elif val >= -0.10: enum = "Neutral"
+    elif val >= -0.70: enum = "Weak"
+    else:              enum = "Recessionary"
+
+    date_tag = ""
+    if ism_pmi_date is not None and as_of is not None:
+        days = (as_of - ism_pmi_date).days
+        date_tag = f"  (月頻，{ism_pmi_date}，{days}d 前)"
+    return f"{val:+.2f}  [{enum}]{date_tag}"
 
 
 def _oas_status(oas) -> str:
     if oas is None:  return "N/A"
-    if oas < 3.5:    return f"{oas:.2f}%  🟢 健康"
-    if oas < 5.0:    return f"{oas:.2f}%  🟡 偏高"
-    if oas < 7.0:    return f"{oas:.2f}%  🟠 警戒"
-    return               f"{oas:.2f}%  🔴 危險 (>7%)"
+    if oas < 3.5:    return f"{oas:.2f}%  [Tight]"
+    if oas < 5.0:    return f"{oas:.2f}%  [Normal]"
+    if oas < 7.0:    return f"{oas:.2f}%  [Warning]"
+    return               f"{oas:.2f}%  [Veto]"
 
 
 def _spread_status(sp) -> str:
     if sp is None:   return "N/A"
-    if sp > 1.5:     return f"{sp:+.2f}%  🟢 正斜率健康"
-    if sp > 0:       return f"{sp:+.2f}%  🟡 略為正斜率"
-    if sp > -0.5:    return f"{sp:+.2f}%  🟠 輕微倒掛"
-    return               f"{sp:+.2f}%  🔴 深度倒掛"
+    if sp > 1.5:     return f"{sp:+.2f}%  [Healthy]"
+    if sp > 0:       return f"{sp:+.2f}%  [Flat]"
+    if sp > -0.5:    return f"{sp:+.2f}%  [Inverted]"
+    return               f"{sp:+.2f}%  [Deep Inverted]"
 
 
 def _vix_status(vix) -> str:
     if vix is None:  return "N/A"
-    if vix < 15:     return f"{vix:.1f}  🟢 低波動"
-    if vix < 20:     return f"{vix:.1f}  🟡 正常"
-    if vix < 28:     return f"{vix:.1f}  🟠 偏高"
-    return               f"{vix:.1f}  🔴 恐慌 (>28)"
+    if vix < 15:     return f"{vix:.1f}  [Low]"
+    if vix < 20:     return f"{vix:.1f}  [Normal]"
+    if vix < 28:     return f"{vix:.1f}  [Warning]"
+    return               f"{vix:.1f}  [Confirmed]"
 
 
 # ── 核心建構函式 ───────────────────────────────────────────────────────────────
+
+# ── L1 helpers ────────────────────────────────────────────────────────────────
+
+def _tactical_directive(
+    regime:  RegimeResult,
+    signals: Dict[str, AssetSignal],
+) -> str:
+    """
+    顯示層翻譯：從 Regime + Signal 推導戰術部位指令。
+    固定枚舉：Clear Tactical / Add Conviction / Add Scouting / Freeze Add
+    不修改任何策略邏輯，pure display translation。
+    """
+    if regime.scenario == "C":
+        return "Clear Tactical"
+
+    tactical = ["QQQM", "SMH", "2330.TW"]
+    buy_signals = [
+        sig for a in tactical
+        if (sig := signals.get(a)) and sig.signal_type == "BUY"
+    ]
+
+    if not buy_signals:
+        return "Freeze Add"
+
+    if regime.scenario == "A" and any(
+        s.signal_strength == "Conviction" for s in buy_signals
+    ):
+        return "Add Conviction"
+
+    return "Add Scouting"
+
+
+_DIRECTIVE_NOTE: Dict[str, str] = {
+    "Clear Tactical":  "Scenario C：戰術倉全數觀望，核心 VOO 照常執行。",
+    "Add Conviction":  "Scenario A 且有 Conviction 訊號：可依目標配置表主動加倉。",
+    "Add Scouting":    "有 BUY 訊號：分批小量試探，嚴守個別上限。",
+    "Freeze Add":      "目前無 BUY 訊號：維持現有部位，等待下一個確認。",
+}
+
+
+def _primary_driver(
+    snap:   Snapshot,
+    regime: RegimeResult,
+) -> tuple[str, str]:
+    """
+    從 Regime 四維分數找出最低維度作為核心驅動因子。
+    tiebreak：credit = macro > sentiment > liquidity（依權重排序）
+    Returns (short_title, one_sentence_detail)
+    """
+    dims = sorted(
+        [
+            ("credit",    regime.credit_score,    0),
+            ("macro",     regime.macro_score,     1),
+            ("sentiment", regime.sentiment_score, 2),
+            ("liquidity", regime.liquidity_score, 3),
+        ],
+        key=lambda x: (x[1], x[2]),
+    )
+    lowest = dims[0][0]
+
+    if lowest == "sentiment":
+        vix = snap.vix
+        if vix is None:
+            return "VIX", "VIX 資料缺失"
+        pct_tag = f"、pct {snap.vix_pct_rank:.0%}" if snap.vix_pct_rank is not None else ""
+        if vix < 15:   enum = "Low"
+        elif vix < 20: enum = "Normal"
+        elif vix < 28: enum = "Warning"
+        else:          enum = "Confirmed"
+        boundary = "未達 Confirmed 門檻（≥28）" if vix < 28 else "已達 Confirmed 門檻"
+        return f"VIX [{enum}]", f"VIX {vix:.1f}{pct_tag}，{boundary}"
+
+    if lowest == "credit":
+        oas = snap.hy_oas
+        if oas is None:
+            return "HY OAS", "HY OAS 資料缺失"
+        if oas < 3.5:   enum = "Tight"
+        elif oas < 5.0: enum = "Normal"
+        elif oas < 7.0: enum = "Warning"
+        else:           enum = "Veto"
+        veto_note = "已達 Veto 門檻" if oas >= 7.0 else "未達 Veto 門檻（需 ≥7%）"
+        return f"HY OAS [{enum}]", f"HY OAS {oas:.2f}%，{veto_note}"
+
+    if lowest == "macro":
+        cfnai = snap.ism_pmi
+        if cfnai is None:
+            return "CFNAI", "CFNAI 資料缺失"
+        if cfnai >= 0.70:    enum = "Strong"
+        elif cfnai >= 0.10:  enum = "Supportive"
+        elif cfnai >= -0.10: enum = "Neutral"
+        elif cfnai >= -0.70: enum = "Weak"
+        else:                enum = "Recessionary"
+        date_note = f"月頻，{snap.ism_pmi_date}" if snap.ism_pmi_date else "月頻"
+        return f"CFNAI [{enum}]", f"CFNAI {cfnai:+.2f}（{date_note}）"
+
+    # liquidity（Yield Spread）
+    sp = snap.spread_10y2y
+    if sp is None:
+        return "Yield Spread", "Yield Spread 資料缺失"
+    if sp > 1.5:    enum = "Healthy"
+    elif sp > 0:    enum = "Flat"
+    elif sp > -0.5: enum = "Inverted"
+    else:           enum = "Deep Inverted"
+    return f"Yield Spread [{enum}]", f"Spread {sp:+.2f}%"
+
+
+# ── L1 section ────────────────────────────────────────────────────────────────
+
+def _decision_summary_section(
+    lines:   list,
+    snap:    Snapshot,
+    regime:  RegimeResult,
+    signals: Dict[str, AssetSignal],
+    pos:     Positions,
+) -> None:
+    """
+    L1 決策摘要：三秒可判讀的核心資訊。
+    純報表層，不修改任何策略邏輯。
+    """
+    directive        = _tactical_directive(regime, signals)
+    driver_title, driver_detail = _primary_driver(snap, regime)
+
+    conf_icon = CONFIDENCE_ICON.get(regime.confidence_score, regime.confidence_score)
+    conf_text = (
+        f"{conf_icon}  —  {snap.confidence_reason}"
+        if snap.confidence_reason
+        else conf_icon
+    )
+
+    sc_header = SCENARIO_HEADER.get(regime.scenario, regime.scenario)
+    cash_pct  = f"{pos.cash_weight * 100:.1f}%"
+
+    lines += [
+        "## 決策摘要",
+        "",
+        "| 項目 | 狀態 |",
+        "|------|------|",
+        f"| **Regime** | {sc_header} |",
+        f"| **信心度** | {conf_text} |",
+        f"| **核心驅動** | {driver_title} |",
+        f"| **戰術指令** | **{directive}** |",
+        f"| **現金** | {cash_pct} |",
+        "",
+        f"> {driver_detail}",
+        f"> {_DIRECTIVE_NOTE.get(directive, '')}",
+        "",
+        "---",
+        "",
+    ]
+
+
+# ── L3 section ────────────────────────────────────────────────────────────────
+
+def _engineering_status_section(
+    lines:  list,
+    snap:   Snapshot,
+    health: "Optional[DataHealthResult]",
+) -> None:
+    """
+    L3 系統工程狀態：極簡一覽，工程資訊不干擾 L1 決策。
+    """
+    _SYS: Dict[str, str] = {
+        "High":   "🟢 Healthy",
+        "Medium": "🟡 Degraded",
+        "Low":    "🔴 Partial",
+    }
+    sys_status = _SYS.get(snap.confidence_score, "⚪ Unknown")
+    reason_str = snap.confidence_reason or "—"
+
+    lines += [
+        "## 系統工程狀態",
+        "",
+        f"> ℹ️ 工程資訊，不影響上方決策摘要方向。",
+        "",
+        f"**{sys_status}**",
+    ]
+    if snap.confidence_score != "High":
+        lines.append(f"　主要原因：{reason_str}")
+    lines += ["", "---", ""]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_report(
     snap:           Snapshot,
@@ -155,6 +343,7 @@ def build_report(
     lines: list[str] = []
     matrix = RegimeMatrix().compute(snap)   # Growth × Inflation（不拋例外）
     _header(lines, snap, regime, pos)
+    _decision_summary_section(lines, snap, regime, signals, pos)   # [L1] 決策摘要
     _macro_section(lines, snap)
     _zscore_section(lines, snap)           # Phase 1：標準化風險座標
     _allocation_summary_section(lines, pos)
@@ -164,6 +353,7 @@ def build_report(
     _action_section(lines, regime, signals)
     _yesterday_comparison_section(lines, snap, regime, pos, output_dir)
     _discipline_section(lines, snap, regime)       # 執行紀律防呆提醒
+    _engineering_status_section(lines, snap, health)   # [L3] 系統工程狀態
     _layer_section(lines, regime, trend, macro_alloc)  # 四層風險架構（Phase 1 參考）
     _data_health_section(lines, health)            # 資料健康度儀表板
     _footer(lines, snap)
@@ -191,39 +381,30 @@ def _one_line_summary(regime: RegimeResult, pos: Positions) -> str:
 
 def _header(lines: list, snap: Snapshot, regime: RegimeResult, pos: Positions) -> None:
     summary = _one_line_summary(regime, pos)
-    lines += [
-        "# 每日投資組合報告",
-        "",
+    conf_line = (
         f"> **分析日期**：{snap.as_of}　｜　"
         f"**Scenario**：{regime.scenario}　｜　"
-        f"**Confidence**：{CONFIDENCE_ICON.get(regime.confidence_score, regime.confidence_score)}",
-        "",
-        f"**{summary}**",
-        "",
-        "---",
-        "",
-    ]
+        f"**Confidence**：{CONFIDENCE_ICON.get(regime.confidence_score, regime.confidence_score)}"
+    )
+    lines += ["# 每日投資組合報告", "", conf_line]
+    if snap.confidence_reason:
+        lines.append(f">")
+        lines.append(f"> ℹ️ {snap.confidence_reason}")
+    lines += ["", f"**{summary}**", "", "---", ""]
 
 
 def _macro_section(lines: list, snap: Snapshot) -> None:
-    # ISM PMI 行：月資料需標示實際資料日期
-    pmi_date_note = (
-        f"（資料日期：{snap.ism_pmi_date}）" if snap.ism_pmi_date is not None else ""
-    )
-    # HY OAS 行：日資料也標示日期（若有）
-    oas_date_note = (
-        f"（{snap.hy_oas_date}）" if snap.hy_oas_date is not None else ""
-    )
+    # CFNAI 日期資訊內嵌至 value cell；HY OAS 日期移至 L3 系統工程狀態
     lines += [
         "## 一、宏觀市場指標",
         "",
-        "| 指標 | 數值 | 資料日期 |",
-        "|------|------|---------|",
-        f"| Macro Growth (CFNAI) | {_cfnai_status(snap.ism_pmi)} | {pmi_date_note} |",
-        f"| HY OAS 信用利差 | {_oas_status(snap.hy_oas)} | {oas_date_note} |",
-        f"| 10Y-2Y 利差 | {_spread_status(snap.spread_10y2y)} | |",
-        f"| VIX 波動指數 | {_vix_status(snap.vix)} | |",
-        f"| VIX 百分位 (252日) | {_fmt(snap.vix_pct_rank, '.1%', na='N/A')} | |",
+        "| 指標 | 數值 |",
+        "|------|------|",
+        f"| Macro Growth (CFNAI) | {_cfnai_status(snap.ism_pmi, snap.ism_pmi_date, snap.as_of)} |",
+        f"| HY OAS 信用利差 | {_oas_status(snap.hy_oas)} |",
+        f"| 10Y-2Y 利差 | {_spread_status(snap.spread_10y2y)} |",
+        f"| VIX 波動指數 | {_vix_status(snap.vix)} |",
+        f"| VIX 百分位 (252日) | {_fmt(snap.vix_pct_rank, '.1%', na='N/A')} |",
         "",
     ]
     if snap.missing_indicators:
