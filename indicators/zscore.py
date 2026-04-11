@@ -141,7 +141,7 @@ ZSCORE_TARGETS: Dict[str, Dict] = {
         "frequency":   "monthly",
         "unit":        "z-score",
         "optional":    False,
-        "label_zh":    "ISM PMI（製造業，60M）",
+        "label_zh":    "CFNAI（Chicago Fed，60M）",
         "window_label":"60M",    # 顯示於報告表頭
         "risk_dir":    "down",   # z 越低 → 成長越疲弱 → 風險越高
     },

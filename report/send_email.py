@@ -135,7 +135,7 @@ def _md_to_html(md_text: str) -> str:
     {body_html}
     <div class="footer">
       本報告由 quant_etl Baseline v1.0 自動生成 ·
-      策略規則：Scenario C = HY_OAS &gt; 7.0% AND VIX &gt; 20，或 PMI &lt; 45
+      策略規則：Scenario C = HY_OAS &gt; 7.0% AND VIX &gt; 20，或 CFNAI &lt; -0.70
     </div>
   </div>
 </body>

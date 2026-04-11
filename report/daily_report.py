@@ -460,7 +460,7 @@ def _regime_section(lines: list, regime: RegimeResult, snap: Snapshot) -> None:
         "",
         "| 維度 | 得分 | 權重 |",
         "|------|------|------|",
-        f"| Macro（PMI）| {regime.macro_score:.1f} | 30% |",
+        f"| Macro（CFNAI）| {regime.macro_score:.1f} | 30% |",
         f"| Credit（HY OAS）| {regime.credit_score:.1f} | 30% |",
         f"| Liquidity（殖利率曲線）| {regime.liquidity_score:.1f} | 15% |",
         f"| Sentiment（VIX）| {regime.sentiment_score:.1f} | 25% |",

@@ -295,7 +295,7 @@ def build_line_flex_payload(md_text: str, report_date: date) -> dict:
                 _kv("VIX",    vix_display, _VALUE, lf=3, vf=6),
                 _kv("HY OAS", p["hy_oas"], _VALUE, lf=3, vf=6),
                 _kv("Spread", p["spread"], _VALUE, lf=3, vf=6),
-                _kv("PMI",    p["pmi"],    _VALUE, lf=3, vf=6),
+                _kv("CFNAI",  p["pmi"],    _VALUE, lf=3, vf=6),
             ],
             "margin": "sm",
         },

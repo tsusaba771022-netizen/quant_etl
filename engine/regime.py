@@ -4,14 +4,17 @@ Regime Engine
 輸入：Snapshot
 輸出：RegimeResult
 
-ISM_PMI_MFG 為可缺失欄位：
+CFNAI（snap.ism_pmi）為可缺失欄位：
   - 有值  → 納入 macro_score 計算
   - 缺失  → macro_score 以其他指標估算，confidence 下降一級
-  - 缺失不 fail，報表中標示 ISM_PMI_MFG = N/A
+  - 缺失不 fail，報表中標示 CFNAI = N/A
+
+NOTE: snap.ism_pmi 欄位名保留（backward compat），實際承載 CFNAI 資料（see etl/config.py）
+CFNAI 語意：0 = 歷史均值，+0.70 = 高於趨勢，-0.70 = 衰退風險起點
 
 confidence_score 文字對應：
   High   → 所有關鍵指標有值
-  Medium → ISM_PMI_MFG 缺失，其餘 OK（目前系統預期狀態）
+  Medium → CFNAI 缺失，其餘 OK（目前系統預期狀態）
   Low    → 多個關鍵指標缺失
 """
 from __future__ import annotations
@@ -30,9 +33,15 @@ VIX_PANIC        = 28.0
 VIX_ELEVATED     = 20.0
 HY_OAS_SAFE      = 5.0
 HY_OAS_DANGER    = 7.0   # 原 5.5% → 6.0% → 7.0%（歷史上 7%+ 僅 2008/COVID 初）
-PMI_RECESSION    = 45.0
-PMI_SLOWDOWN     = 48.0
 SPREAD_INVERSION = 0.0    # 10Y-2Y < 0 → inverted yield curve
+
+# CFNAI 語意門檻（etl/config.py 已將 ISM_PMI_MFG 的 fred_id 改為 "CFNAI"）
+# snap.ism_pmi 欄位名保留（backward compat），實際承載 CFNAI 資料
+# CFNAI: 0 = 歷史均值; >+0.70 = 高於趨勢; <-0.70 = 衰退風險起點
+CFNAI_ABOVE_TREND    =  0.70   # > 趨勢成長
+CFNAI_MILD_EXPANSION =  0.10   # 溫和擴張（對齊 macro_alloc.CFNAI_MILD_EXPANSION）
+CFNAI_NEAR_TREND     = -0.10   # 接近歷史均值
+CFNAI_SLOWDOWN       = -0.70   # 放緩 / 衰退風險起點（< 此值觸發 Scenario C）
 
 
 # ── Output ────────────────────────────────────────────────────────────────────
@@ -91,7 +100,7 @@ class RegimeEngine:
             "as_of":            str(snap.as_of),
             "confidence":       snap.confidence_score,
             "missing":          snap.missing_indicators,
-            "ISM_PMI_MFG":      snap.ism_pmi if snap.ism_pmi is not None else "N/A",
+            "CFNAI":            snap.ism_pmi if snap.ism_pmi is not None else "N/A",
             "HY_OAS":           snap.hy_oas,
             "VIX":              snap.vix,
             "VIX_PCT_RANK_252": snap.vix_pct_rank,
@@ -132,32 +141,32 @@ class RegimeEngine:
 
     def _macro_score(self, snap: Snapshot) -> SubScore:
         """
-        ISM_PMI_MFG 可缺失：
-          有值  → 直接評分
+        CFNAI（snap.ism_pmi）可缺失：
+          有值  → 依 CFNAI 語意門檻評分
           缺失  → 以 yield spread 方向作為代理，標注 N/A
         """
         if snap.ism_pmi is not None:
-            pmi = snap.ism_pmi
-            if pmi >= 55:       score = 90
-            elif pmi >= 50:     score = 70
-            elif pmi >= PMI_SLOWDOWN:  score = 50
-            elif pmi >= PMI_RECESSION: score = 25
-            else:               score = 5
-            note = f"ISM_PMI={pmi:.1f} → score={score}"
+            cfnai = snap.ism_pmi
+            if cfnai >= CFNAI_ABOVE_TREND:      score = 90
+            elif cfnai >= CFNAI_MILD_EXPANSION:  score = 70
+            elif cfnai >= CFNAI_NEAR_TREND:      score = 50
+            elif cfnai >= CFNAI_SLOWDOWN:        score = 25
+            else:                                score = 5
+            note = f"CFNAI={cfnai:+.2f} → score={score}"
         else:
-            # ISM_PMI_MFG = N/A：用 yield spread 方向作為代理估計
+            # CFNAI = N/A：用 yield spread 方向作為代理估計
             if snap.spread_10y2y is not None:
                 if snap.spread_10y2y > 1.0:    score = 65  # 正斜率，偏健康
                 elif snap.spread_10y2y > 0:     score = 50
                 elif snap.spread_10y2y > -0.5:  score = 35
                 else:                           score = 20  # 深度倒掛
                 note = (
-                    f"ISM_PMI_MFG = N/A，"
+                    f"CFNAI = N/A，"
                     f"以 YIELD_SPREAD_10Y2Y={snap.spread_10y2y:.2f}% 代理估算 → score={score}"
                 )
             else:
                 score = 50   # 完全無資料，給中性
-                note  = "ISM_PMI_MFG = N/A，YIELD_SPREAD 亦缺失 → 中性 50"
+                note  = "CFNAI = N/A，YIELD_SPREAD 亦缺失 → 中性 50"
 
         return SubScore(score, note, weight=0.30)
 
@@ -221,14 +230,15 @@ class RegimeEngine:
         # ── Scenario C：結構性惡化（優先判定）────────────────────────────────
         #
         # 觸發規則（任一成立即觸發）：
-        #   1. PMI < 45（實體經濟衰退，單條件即可）
+        #   1. CFNAI < -0.70（實體經濟衰退風險，單條件即可）
+        #      NOTE: snap.ism_pmi 欄位名保留（backward compat），實際承載 CFNAI 資料
         #   2. HY_OAS > 7.0%  且  VIX > VIX_ELEVATED（20）
         #      — 需雙條件確認，避免升息環境下 Effective Yield 虛高誤判
         #
         c_triggers = []
 
-        if pmi is not None and pmi < PMI_RECESSION:
-            c_triggers.append(f"PMI={pmi:.1f}<{PMI_RECESSION}")
+        if pmi is not None and pmi < CFNAI_SLOWDOWN:
+            c_triggers.append(f"CFNAI={pmi:+.2f}<{CFNAI_SLOWDOWN}")
 
         if hy is not None and hy > self.hy_oas_c_threshold:
             if vix > VIX_ELEVATED:
@@ -248,10 +258,13 @@ class RegimeEngine:
         # ── Scenario A：極度恐慌但信用健康 ────────────────────────────────────
         vix_stressed  = vix > VIX_PANIC
         credit_ok     = hy is not None and hy < HY_OAS_SAFE
-        growth_ok     = (pmi is None) or (pmi >= PMI_SLOWDOWN)
+        growth_ok     = (pmi is None) or (pmi >= CFNAI_NEAR_TREND)
 
         if vix_stressed and credit_ok and growth_ok:
-            pmi_note = f"PMI={pmi:.1f}" if pmi else "PMI=N/A（無法確認，但未見惡化訊號）"
+            pmi_note = (
+                f"CFNAI={pmi:+.2f}" if pmi is not None
+                else "CFNAI=N/A（無法確認，但未見惡化訊號）"
+            )
             return (
                 "A", "Panic", "Panic / Potential Reversal",
                 f"Scenario A：VIX={vix:.1f}>{VIX_PANIC}（極度恐慌）"
@@ -269,7 +282,7 @@ class RegimeEngine:
         if hy is not None and hy >= HY_OAS_SAFE:
             b_triggers.append(f"HY_OAS={hy:.2f}% 偏高")
         if pmi is None and self.pmi_na_triggers_b:
-            b_triggers.append("ISM_PMI_MFG=N/A（無法確認成長動能）")
+            b_triggers.append("CFNAI=N/A（無法確認成長動能）")
 
         if b_triggers:
             return (
@@ -282,5 +295,5 @@ class RegimeEngine:
         return (
             "Neutral", "Normal", "Expansion / Soft Landing",
             f"市場無明確壓力訊號（regime_score={regime_score:.1f}）。"
-            + ("" if pmi else " ISM_PMI_MFG=N/A，成長動能無法確認。"),
+            + ("" if pmi is not None else " CFNAI=N/A，成長動能無法確認。"),
         )

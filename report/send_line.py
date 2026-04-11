@@ -304,7 +304,7 @@ def build_line_message(md_text: str, report_date: date) -> str:
         f"  VIX    {vix_note}",
         f"  HY OAS {hy_note}",
         f"  Spread {spread_note}",
-        f"  PMI    {pmi_note}",
+        f"  CFNAI  {pmi_note}",
         S,
     )
 
