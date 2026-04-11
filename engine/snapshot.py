@@ -96,17 +96,29 @@ class Snapshot:
     @property
     def confidence_score(self) -> str:
         """
-        High   : 所有關鍵指標（含 ISM_PMI）都有值
-        Medium : ISM_PMI 缺失，其他關鍵指標OK
+        High   : 所有關鍵指標有值，且 CFNAI 資料新鮮（staleness ≤ MAX_MONTHLY_STALENESS_DAYS）
+        Medium : CFNAI 缺失或過期（staleness > 閾值），其他關鍵指標 OK
         Low    : 多個關鍵指標缺失
+
+        NOTE: ism_pmi_date=None 時無法判斷新鮮度，本輪不主動降級（保守預設為新鮮）。
         """
         key_indicators = [self.hy_oas, self.vix, self.vix_pct_rank, self.spread_10y2y]
         available = sum(1 for v in key_indicators if v is not None)
 
-        if self.ism_pmi is not None and available == len(key_indicators):
+        # CFNAI 新鮮度判斷：有值 + 日期已知 + 未超閾值 → 視為新鮮
+        # ism_pmi_date=None 表示日期未知，staleness 無法判定 → 本輪不主動降級
+        cfnai_fresh = (
+            self.ism_pmi is not None
+            and (
+                self.ism_pmi_date is None  # 日期未知，不降級
+                or (self.as_of - self.ism_pmi_date).days <= MAX_MONTHLY_STALENESS_DAYS
+            )
+        )
+
+        if cfnai_fresh and available == len(key_indicators):
             return "High"
         if available >= 3:
-            return "Medium"   # ISM_PMI 或一個指標缺失
+            return "Medium"   # CFNAI 缺失 / 過期 / 一個日頻指標缺失
         return "Low"
 
     @property

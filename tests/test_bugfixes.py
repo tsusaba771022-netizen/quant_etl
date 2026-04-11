@@ -1876,6 +1876,82 @@ class TestGroupL_MonthlyStaleThreshold(unittest.TestCase):
 # Group M  孤兒模組刪除後回歸（engine/defense.py & engine/sizing.py）
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Group N  confidence_score staleness degradation
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestGroupN_ConfidenceStaleness(unittest.TestCase):
+    """
+    驗證 Snapshot.confidence_score 在 CFNAI 資料過期時正確降至 Medium。
+    僅測試 confidence_score property，不觸碰 DB 或 regime 邏輯。
+    """
+
+    def _make_snap(self, ism_pmi, ism_pmi_date, as_of):
+        """建構最小可用 Snapshot（其餘關鍵日頻指標全給值，確保 available=4）。"""
+        from datetime import date
+        from engine.snapshot import Snapshot
+        snap = Snapshot(as_of=as_of)
+        snap.ism_pmi      = ism_pmi
+        snap.ism_pmi_date = ism_pmi_date
+        snap.hy_oas       = 3.0
+        snap.vix          = 18.0
+        snap.vix_pct_rank = 0.55
+        snap.spread_10y2y = 0.40
+        return snap
+
+    # ── N1  CFNAI 過期 69 天 → Medium ─────────────────────────────────────────
+
+    def test_N1_stale_cfnai_degrades_confidence_to_medium(self):
+        """staleness=69 天 > MAX_MONTHLY_STALENESS_DAYS(60) → Medium。"""
+        from datetime import date
+        snap = self._make_snap(
+            ism_pmi      = -0.11,
+            ism_pmi_date = date(2026, 2, 1),
+            as_of        = date(2026, 4, 11),   # staleness = 69 天
+        )
+        self.assertEqual(snap.confidence_score, "Medium",
+                         "CFNAI staleness=69 天應降為 Medium")
+
+    # ── N2  CFNAI 新鮮 22 天 → High ───────────────────────────────────────────
+
+    def test_N2_fresh_cfnai_returns_high(self):
+        """staleness=22 天 ≤ 60 → High（正常情況）。"""
+        from datetime import date
+        snap = self._make_snap(
+            ism_pmi      = -0.11,
+            ism_pmi_date = date(2026, 3, 20),
+            as_of        = date(2026, 4, 11),   # staleness = 22 天
+        )
+        self.assertEqual(snap.confidence_score, "High",
+                         "CFNAI staleness=22 天應保持 High")
+
+    # ── N3  ism_pmi_date=None → High（無法判斷，不主動降級）────────────────────
+
+    def test_N3_unknown_date_does_not_degrade(self):
+        """ism_pmi_date=None：staleness 無法判定，本輪不主動降級 → High。"""
+        from datetime import date
+        snap = self._make_snap(
+            ism_pmi      = -0.11,
+            ism_pmi_date = None,
+            as_of        = date(2026, 4, 11),
+        )
+        self.assertEqual(snap.confidence_score, "High",
+                         "ism_pmi_date=None 無法判斷新鮮度，不應主動降為 Medium")
+
+    # ── N4  ism_pmi=None → Medium（真缺失，沿用既有邏輯）────────────────────────
+
+    def test_N4_missing_cfnai_returns_medium(self):
+        """ism_pmi=None（真缺失）→ Medium（既有行為不變）。"""
+        from datetime import date
+        snap = self._make_snap(
+            ism_pmi      = None,
+            ism_pmi_date = None,
+            as_of        = date(2026, 4, 11),
+        )
+        self.assertEqual(snap.confidence_score, "Medium",
+                         "ism_pmi=None 應為 Medium（舊行為回歸）")
+
+
 class TestGroupM_OrphanModuleRemoval(unittest.TestCase):
     """確認 engine/defense.py 與 engine/sizing.py 已不存在，
     且主流程所有生產模組不受影響。"""
